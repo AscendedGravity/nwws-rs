@@ -1,0 +1,6 @@
+111
+NOUS41 KWBC 201530 AAA
+PNSXXX
+Headline line
+Body line 1
+Body line 2

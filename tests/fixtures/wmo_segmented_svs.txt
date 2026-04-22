@@ -1,0 +1,40 @@
+402
+WWUS73 KLOT 211620
+SVSLOT
+ILC031-043-197-211645-
+/O.CON.KLOT.TO.W.0001.000000T0000Z-260421T1630Z/
+Severe Weather Statement
+National Weather Service Chicago IL
+1120 AM CDT Tue Apr 21 2026
+
+...A TORNADO WARNING REMAINS IN EFFECT UNTIL 1130 AM CDT FOR NORTH CENTRAL KANE...SOUTH CENTRAL MCHENRY AND NORTHWESTERN DUPAGE COUNTIES...
+
+At 1120 AM CDT, a severe thunderstorm capable of producing a tornado
+was located over Huntley, moving east at 35 mph.
+
+LAT...LON 4220 8850 4214 8825 4207 8797 4217 8788 4226 8829
+TIME...MOT...LOC 1620Z 265DEG 31KT 4217 8837
+TORNADO...RADAR INDICATED
+
+$$
+
+ILC089-111-211700-
+/O.NEW.KLOT.SV.W.0002.260421T1620Z-260421T1700Z/
+Severe Thunderstorm Warning
+National Weather Service Chicago IL
+1120 AM CDT Tue Apr 21 2026
+
+* Severe thunderstorm warning for...
+  Eastern Kane County in northeastern Illinois...
+  Western McHenry County in northeastern Illinois...
+
+* At 1120 AM CDT, a severe thunderstorm was located near Elgin.
+
+HAZARD...60 mph wind gusts and quarter size hail.
+SOURCE...Radar indicated.
+IMPACT...Hail damage to vehicles is expected.
+
+LAT...LON 4208 8840 4201 8808 4215 8798 4220 8830
+TIME...MOT...LOC 1620Z 250DEG 28KT 4208 8824
+
+$$

@@ -1,0 +1,11 @@
+<message to='enduser@server/laptop' type='groupchat' from='nwws@nwws-oi.weather.gov/nwws-oi'>
+<body>KARX issues RR8 valid 2013-05-25T02:20:34Z</body>
+<html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'>KARX issues RR8 valid 2013-05-25T02:20:34Z</body></html>
+<x xmlns='nwws-oi' cccc='KARX' ttaaii='SRUS83' issue='2013-05-25T02:20:34Z' awipsid='RR8ARX' id='10313.6'>111
+SRUS83 KARX 250220
+RR8ARX
+:
+: AUTOMATED GAUGE DATA COLLECTED FROM IOWA FLOOD CENTER
+:
+.A CDGI4 20130524 C DH2100/HGIRP 2.63 : MORGAN CREEK NEAR CEDAR RAPIDS</x>
+</message>

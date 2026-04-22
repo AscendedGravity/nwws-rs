@@ -1,0 +1,12 @@
+<message to='enduser@server/laptop' type='groupchat' from='nwws@nwws-oi.weather.gov/nwws-oi'>
+<body>KLOT issues TOR valid 2026-04-21T16:00:00Z</body>
+<x xmlns='nwws-oi' cccc='KLOT' ttaaii='WUUS53' issue='2026-04-21T16:00:00Z' awipsid='SVSLOT' id='41001.19'>401
+WUUS53 KLOT 211600
+TORLOT
+ILC031-043-197-211630-
+/O.NEW.KLOT.TO.W.0001.260421T1600Z-260421T1630Z/
+
+LAT...LON 4215 8850 4203 8820 4194 8810 4198 8786 4213 8784 4222 8839
+TIME...MOT...LOC 1600Z 265DEG 31KT 4208 8837
+</x>
+</message>

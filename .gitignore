@@ -1,0 +1,6 @@
+/target
+/python/nwws_rs/_native*.pyd
+/python/nwws_rs/_native*.so
+/python/nwws_rs/_native*.dll
+/python/nwws_rs/_native*.dylib
+/.venv

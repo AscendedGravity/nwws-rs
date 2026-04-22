@@ -1,0 +1,37 @@
+<message to='enduser@server/laptop' type='groupchat' from='nwws@nwws-oi.weather.gov/nwws-oi'>
+<body>KLOT issues TOR valid 2026-04-21T16:00:00Z</body>
+<html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'>KLOT issues TOR valid 2026-04-21T16:00:00Z</body></html>
+<x xmlns='nwws-oi' cccc='KLOT' ttaaii='WUUS53' issue='2026-04-21T16:00:00Z' awipsid='TORLOT' id='41001.17'>401
+WUUS53 KLOT 211600
+TORLOT
+ILC031-043-197-211630-
+/O.NEW.KLOT.TO.W.0001.260421T1600Z-260421T1630Z/
+
+BULLETIN - EAS ACTIVATION REQUESTED
+Tornado Warning
+National Weather Service Chicago IL
+1100 AM CDT Tue Apr 21 2026
+
+The National Weather Service in Chicago has issued a
+
+* Tornado Warning for...
+  North central Kane County in northeastern Illinois...
+  South central McHenry County in northeastern Illinois...
+  Northwestern DuPage County in northeastern Illinois...
+
+* Until 1130 AM CDT.
+
+* At 1100 AM CDT, a severe thunderstorm capable of producing a tornado
+  was located over Pingree Grove, moving east at 35 mph.
+
+HAZARD...Tornado and quarter size hail.
+SOURCE...Radar indicated rotation.
+IMPACT...Flying debris will be dangerous to those caught without shelter.
+
+LAT...LON 4215 8850 4203 8820 4194 8810 4198 8786 4213 8784 4222 8839
+TIME...MOT...LOC 1600Z 265DEG 31KT 4208 8837
+TORNADO...RADAR INDICATED
+MAX HAIL SIZE...1.00 IN
+
+$$</x>
+</message>
