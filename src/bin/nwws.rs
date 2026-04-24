@@ -45,6 +45,11 @@ fn run(mut args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
             let options = parse_command_options("replay", &mut args)?;
             replay_command(&path, options.hint, options.output)
         }
+        "active-at" | "active" => {
+            let path = take_path_arg("active-at", &mut args)?;
+            let options = parse_active_at_options("active-at", &mut args)?;
+            active_at_command(&path, options)
+        }
         "summary" => {
             let path = take_path_arg("summary", &mut args)?;
             let hint = parse_optional_hint("summary", &mut args)?;
@@ -113,6 +118,11 @@ fn archive_command(args: &mut impl Iterator<Item = OsString>) -> Result<(), CliE
             let output = parse_output_options("archive verify", args)?;
             archive_verify_command(&archive, output)
         }
+        "active-at" | "active" => {
+            let archive = take_path_arg("archive active-at", args)?;
+            let options = parse_active_at_options("archive active-at", args)?;
+            active_at_command(&archive, options)
+        }
         other => Err(CliError::usage(format!(
             "unknown archive subcommand {other}\n\n{}",
             usage()
@@ -154,6 +164,7 @@ fn usage() -> &'static str {
     "usage:
   cargo run --bin nwws -- inspect <file> [--hint <auto|oi|pid201|bulletin|stream>] [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- replay <directory> [--hint <auto|oi|pid201|bulletin|stream>] [--format <text|json|jsonl|tool-result>]
+  cargo run --bin nwws -- active-at <file-or-directory-or-archive> --at <utc-rfc3339> [--hint <auto|oi|pid201|bulletin|stream>] [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- summary <file-or-directory> [--hint <auto|oi|pid201|bulletin|stream>]
   cargo run --bin nwws -- oi connect <username> <password> [--count <n>] [--history <n>]
   cargo run --bin nwws -- pid201 inspect <capture-file> [--format <text|json|jsonl|tool-result>]
@@ -161,10 +172,12 @@ fn usage() -> &'static str {
   cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir> [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- archive import <input-path> <archive-dir> [--hint <auto|oi|pid201|bulletin|stream>] [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- archive verify <archive-dir> [--format <text|json|jsonl|tool-result>]
+  cargo run --bin nwws -- archive active-at <archive-dir> --at <utc-rfc3339> [--format <text|json|jsonl|tool-result>]
 
 commands:
   inspect          parse one file and print detailed NWWS metadata
   replay           walk a directory and print one line per parsed file
+  active-at        return warning VTEC records active at a reference UTC
   summary          aggregate detected source, transport, and family counts
   oi connect       open a blocking NWWS-OI XMPP session and print parsed messages
   pid201 inspect   force a file through the PID201 framed-stream path
@@ -172,6 +185,7 @@ commands:
   pid201 archive   archive a PID201 capture into a deduplicated record store
   archive import   ingest mixed NWWS inputs into a deduplicated record store
   archive verify   re-parse archived records and validate the stored digests
+  archive active-at query archived warning records active at a reference UTC
 
 notes:
   Machine-readable modes are available with --format json, --format jsonl, or --format tool-result.
@@ -272,6 +286,77 @@ fn parse_command_options(
                 )));
             }
         }
+    }
+
+    Ok(options)
+}
+
+fn parse_active_at_options(
+    command: &str,
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<ActiveAtOptions, CliError> {
+    let mut options = ActiveAtOptions::default();
+
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--at" | "--reference" | "--reference-utc" => {
+                if options.reference_utc.is_some() {
+                    return Err(CliError::usage(format!(
+                        "duplicate --at for {command}\n\n{}",
+                        usage()
+                    )));
+                }
+                options.reference_utc = Some(parse_string_arg(command, "--at", args)?);
+            }
+            "--hint" => {
+                if options.hint.is_some() {
+                    return Err(CliError::usage(format!(
+                        "duplicate --hint for {command}\n\n{}",
+                        usage()
+                    )));
+                }
+                let Some(value) = args.next() else {
+                    return Err(CliError::usage(format!(
+                        "missing value for --hint in {command}\n\n{}",
+                        usage()
+                    )));
+                };
+                options.hint = Some(parse_hint_value(&value.to_string_lossy())?);
+            }
+            "--format" => {
+                if options.output != OutputFormat::Text {
+                    return Err(CliError::usage(format!(
+                        "duplicate --format for {command}\n\n{}",
+                        usage()
+                    )));
+                }
+                let Some(value) = args.next() else {
+                    return Err(CliError::usage(format!(
+                        "missing value for --format in {command}\n\n{}",
+                        usage()
+                    )));
+                };
+                options.output = parse_output_format(&value.to_string_lossy())?;
+            }
+            "--json" => set_output_flag(command, &mut options.output, OutputFormat::Json)?,
+            "--jsonl" => set_output_flag(command, &mut options.output, OutputFormat::Jsonl)?,
+            "--tool-result" => {
+                set_output_flag(command, &mut options.output, OutputFormat::ToolResult)?
+            }
+            other => {
+                return Err(CliError::usage(format!(
+                    "unexpected extra argument for {command}: {other}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+    }
+
+    if options.reference_utc.is_none() {
+        return Err(CliError::usage(format!(
+            "missing --at for {command}\n\n{}",
+            usage()
+        )));
     }
 
     Ok(options)
@@ -563,6 +648,53 @@ fn replay_command(
         return Err(CliError::failure(format!(
             "replay finished with {} parse failure(s)",
             summary.failures
+        )));
+    }
+
+    Ok(())
+}
+
+fn active_at_command(path: &Path, options: ActiveAtOptions) -> Result<(), CliError> {
+    if !path.exists() {
+        return Err(CliError::failure(format!(
+            "path does not exist for active-at: {}",
+            path.display()
+        )));
+    }
+
+    let reference_utc = options
+        .reference_utc
+        .as_deref()
+        .expect("active-at options require --at");
+    let report =
+        nwws_rs::api::active_warnings_at(path, reference_utc, options.hint).map_err(|err| {
+            CliError::failure(format!(
+                "failed to query active warnings in {} at {}: {err}",
+                path.display(),
+                reference_utc
+            ))
+        })?;
+
+    match options.output {
+        OutputFormat::Text => print_active_warning_report(&report),
+        OutputFormat::Json => print_json(&report)?,
+        OutputFormat::Jsonl => print_active_warning_jsonl(&report)?,
+        OutputFormat::ToolResult => {
+            let status = if report.failures == 0 { "ok" } else { "error" };
+            print_tool_result(
+                "active-at",
+                status,
+                &report,
+                active_tool_inputs(path, reference_utc),
+                active_tool_provenance(path, reference_utc),
+            )?;
+        }
+    }
+
+    if report.failures > 0 {
+        return Err(CliError::failure(format!(
+            "active-at finished with {} parse failure(s)",
+            report.failures
         )));
     }
 
@@ -1274,6 +1406,39 @@ fn print_archive_import_summary(archive_dir: &Path, summary: &ArchiveImportSumma
     }
 }
 
+fn print_active_warning_report(report: &nwws_rs::api::ActiveWarningReport) {
+    println!("root: {}", report.root.display());
+    println!("reference-utc: {}", report.reference_utc);
+    println!("scanned-files: {}", report.scanned_files);
+    println!("parsed-files: {}", report.parsed_files);
+    println!("messages: {}", report.messages);
+    println!("warning-vtec-segments: {}", report.warning_vtec_segments);
+    println!("future-messages: {}", report.future_messages);
+    println!("active-records: {}", report.active_records);
+    println!("failures: {}", report.failures);
+
+    for record in &report.records {
+        println!();
+        println!("active {}:", record.key);
+        println!("  source: {}", record.source_path.display());
+        println!("  heading: {}", record.heading);
+        if let Some(issued_at) = &record.issued_at {
+            println!("  issued-at: {issued_at}");
+        }
+        if let Some(awips_id) = &record.awips_id {
+            println!("  awips-id: {awips_id}");
+        }
+        println!("  product-family: {}", record.product_family);
+        println!("  event-family: {}", record.event_family);
+        println!("  action: {}", record.action);
+        println!("  vtec: {}", record.vtec);
+        println!("  ugcs: {}", record.ugcs.join(","));
+        if let Some(headline) = &record.headline {
+            println!("  headline: {headline}");
+        }
+    }
+}
+
 fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
     let payload = serde_json::to_string_pretty(value)
         .map_err(|err| CliError::failure(format!("failed to serialize JSON output: {err}")))?;
@@ -1367,6 +1532,26 @@ fn print_archive_verify_jsonl(report: &nwws_rs::api::ArchiveVerifyReport) -> Res
     Ok(())
 }
 
+fn print_active_warning_jsonl(report: &nwws_rs::api::ActiveWarningReport) -> Result<(), CliError> {
+    for record in &report.records {
+        print_json_line(&ActiveWarningJsonlRecord {
+            schema: "nwws.active_warnings.v1",
+            record_type: "active-warning",
+            reference_utc: &report.reference_utc,
+            record,
+        })?;
+    }
+    for error in &report.errors {
+        print_json_line(&ActiveWarningErrorJsonlRecord {
+            schema: "nwws.active_warnings.v1",
+            record_type: "error",
+            reference_utc: &report.reference_utc,
+            error,
+        })?;
+    }
+    Ok(())
+}
+
 fn print_tool_result<T: Serialize>(
     operation: &str,
     status: &str,
@@ -1391,10 +1576,7 @@ fn print_tool_result<T: Serialize>(
             }
         ],
         "evidence": tool_evidence(&data),
-        "limitations": [
-            "Output reflects parser results for the supplied local input only.",
-            "No external NWS source-of-truth or network delivery validation is performed."
-        ],
+        "limitations": tool_limitations(operation),
         "provenance": provenance
     });
     print_json(&envelope)
@@ -1404,6 +1586,7 @@ fn tool_name(operation: &str) -> &'static str {
     match operation {
         "inspect" => "warning.parse_text",
         "replay" => "warning.replay",
+        "active-at" => "warning.active_at_reference",
         "archive-import" => "warning.archive_import",
         "archive-verify" => "warning.archive_verify",
         _ => "warning.unknown",
@@ -1414,6 +1597,14 @@ fn tool_inputs(source_path: &Path, archive_dir: Option<&Path>) -> serde_json::Va
     json!({
         "source_path": source_path.display().to_string(),
         "archive_dir": archive_dir.map(|path| path.display().to_string())
+    })
+}
+
+fn active_tool_inputs(source_path: &Path, reference_utc: &str) -> serde_json::Value {
+    json!({
+        "source_path": source_path.display().to_string(),
+        "archive_dir": source_path.join("records").is_dir().then(|| source_path.display().to_string()),
+        "reference_utc": reference_utc
     })
 }
 
@@ -1431,8 +1622,39 @@ fn tool_provenance(
     })
 }
 
+fn active_tool_provenance(source_path: &Path, reference_utc: &str) -> serde_json::Value {
+    json!({
+        "producer": "nwws-rs",
+        "operation": "active-at",
+        "source_path": source_path.display().to_string(),
+        "archive_dir": source_path.join("records").is_dir().then(|| source_path.display().to_string()),
+        "reference_utc": reference_utc,
+        "contract": "wx.tool_result.v1"
+    })
+}
+
+fn tool_limitations(operation: &str) -> Vec<&'static str> {
+    let mut limitations = vec![
+        "Output reflects parser results for the supplied local input only.",
+        "No external NWS source-of-truth or network delivery validation is performed.",
+    ];
+    if operation == "active-at" {
+        limitations.push(
+            "Active-at queries use local WMO heading times and VTEC intervals; records without warning P-VTEC are not returned.",
+        );
+    }
+    limitations
+}
+
 fn tool_evidence(data: &serde_json::Value) -> Vec<serde_json::Value> {
     let mut evidence = Vec::new();
+    if let Some(active_records) = data.get("active_records").and_then(|value| value.as_u64()) {
+        evidence.push(json!({
+            "evidence_type": "active_warning_records",
+            "summary": format!("Returned {active_records} active warning record(s)."),
+            "count": active_records
+        }));
+    }
     if let Some(messages) = data.get("messages").and_then(|value| value.as_array()) {
         evidence.push(json!({
             "evidence_type": "parsed_messages",
@@ -1799,6 +2021,23 @@ impl Default for CommandOptions {
     }
 }
 
+#[derive(Debug)]
+struct ActiveAtOptions {
+    reference_utc: Option<String>,
+    hint: Option<IngestHint>,
+    output: OutputFormat,
+}
+
+impl Default for ActiveAtOptions {
+    fn default() -> Self {
+        Self {
+            reference_utc: None,
+            hint: None,
+            output: OutputFormat::Text,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct InspectionJsonlRecord<'a> {
     schema: &'static str,
@@ -1855,6 +2094,22 @@ struct ArchiveVerifyJsonlRecord<'a> {
     record_type: &'static str,
     archive_dir: &'a Path,
     record: &'a nwws_rs::api::ArchiveVerifyRecord,
+}
+
+#[derive(Serialize)]
+struct ActiveWarningJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    reference_utc: &'a str,
+    record: &'a nwws_rs::api::ActiveWarningRecord,
+}
+
+#[derive(Serialize)]
+struct ActiveWarningErrorJsonlRecord<'a> {
+    schema: &'static str,
+    record_type: &'static str,
+    reference_utc: &'a str,
+    error: &'a nwws_rs::api::ActiveWarningFailure,
 }
 
 #[derive(Debug)]

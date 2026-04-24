@@ -4,9 +4,9 @@ use pyo3::types::PyBytes;
 use serde::Serialize;
 
 use crate::api::{
-    MessageSummary, archive_import, archive_verify, inspect_bytes, inspect_oi_message,
-    inspect_path, inspect_text, scan_path, split_pid201_bytes, split_pid201_path, to_json,
-    write_pid201_split,
+    MessageSummary, active_warnings_at, archive_import, archive_verify, inspect_bytes,
+    inspect_oi_message, inspect_path, inspect_text, scan_path, split_pid201_bytes,
+    split_pid201_path, to_json, write_pid201_split,
 };
 use crate::ingest::IngestHint;
 use crate::oi_client::{NwwsOiClient, OiClientConfig};
@@ -50,6 +50,17 @@ fn inspect_path_json(path: &str, hint: Option<&str>) -> PyResult<String> {
 fn scan_path_json(path: &str, hint: Option<&str>) -> PyResult<String> {
     let hint = hint.map(|value| parse_hint(Some(value))).transpose()?;
     let report = scan_path(path, hint).map_err(runtime_err)?;
+    to_json(&report).map_err(runtime_err)
+}
+
+#[pyfunction(signature = (path, reference_utc, hint=None))]
+fn active_warnings_at_json(
+    path: &str,
+    reference_utc: &str,
+    hint: Option<&str>,
+) -> PyResult<String> {
+    let hint = hint.map(|value| parse_hint(Some(value))).transpose()?;
+    let report = active_warnings_at(path, reference_utc, hint).map_err(runtime_err)?;
     to_json(&report).map_err(runtime_err)
 }
 
@@ -287,6 +298,7 @@ fn python_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(inspect_text_json, m)?)?;
     m.add_function(wrap_pyfunction!(inspect_path_json, m)?)?;
     m.add_function(wrap_pyfunction!(scan_path_json, m)?)?;
+    m.add_function(wrap_pyfunction!(active_warnings_at_json, m)?)?;
     m.add_function(wrap_pyfunction!(split_pid201_bytes_json, m)?)?;
     m.add_function(wrap_pyfunction!(split_pid201_path_json, m)?)?;
     m.add_function(wrap_pyfunction!(write_pid201_split_json, m)?)?;

@@ -147,7 +147,8 @@ import nwws_rs
 
 import_report = nwws_rs.archive_import("captures", "archive")
 verify_report = nwws_rs.archive_verify("archive")
-print(import_report.archived_records, verify_report.verified_records)
+active_report = nwws_rs.active_warnings_at("archive", "2026-04-21T16:25:00Z")
+print(import_report.archived_records, verify_report.verified_records, active_report.active_records)
 ```
 
 CLI:
@@ -155,6 +156,7 @@ CLI:
 ```powershell
 cargo run --bin nwws -- archive import captures archive
 cargo run --bin nwws -- archive verify archive
+cargo run --bin nwws -- archive active-at archive --at 2026-04-21T16:25:00Z --format tool-result
 ```
 
 ## Python API
@@ -176,6 +178,7 @@ Main entry points:
 - `inspect_path`
 - `scan_path`
 - `collect_input_paths`
+- `active_warnings_at`
 - `split_pid201_bytes`
 - `split_pid201_file`
 - `write_pid201_split`
@@ -200,6 +203,7 @@ The `nwws` binary is the fastest way to inspect real captures without writing co
 ```powershell
 cargo run --bin nwws -- inspect <file>
 cargo run --bin nwws -- replay <directory>
+cargo run --bin nwws -- active-at <file-or-directory-or-archive> --at <utc-rfc3339>
 cargo run --bin nwws -- summary <file-or-directory>
 cargo run --bin nwws -- oi connect <username> <password> --count 5
 cargo run --bin nwws -- pid201 inspect <capture-file>
@@ -207,9 +211,10 @@ cargo run --bin nwws -- pid201 split <capture-file> <output-dir>
 cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir>
 cargo run --bin nwws -- archive import <input-path> <archive-dir>
 cargo run --bin nwws -- archive verify <archive-dir>
+cargo run --bin nwws -- archive active-at <archive-dir> --at <utc-rfc3339>
 ```
 
-Inspection, replay, PID201 inspect/archive, and archive import/verify support machine-readable output with `--format json`, `--format jsonl`, or `--format tool-result`. JSON output uses the same API inspection/archive structures exposed to Python, including WMO heading parts, office, AWIPS/PIL, product family, UGC, VTEC, LAT/LON, TIME/MOT/LOC, semantic fingerprints, raw bulletin BLAKE3 hashes, and archive IDs. `--format tool-result` wraps the report in a `wx.tool_result.v1` envelope with `artifacts`, `evidence`, `limitations`, and `provenance`.
+Inspection, replay, active-at, PID201 inspect/archive, and archive import/verify support machine-readable output with `--format json`, `--format jsonl`, or `--format tool-result`. JSON output uses the same API inspection/archive structures exposed to Python, including WMO heading parts, office, AWIPS/PIL, product family, UGC, VTEC, LAT/LON, TIME/MOT/LOC, semantic fingerprints, raw bulletin BLAKE3 hashes, and archive IDs. `active-at` returns warning P-VTEC records active at the supplied RFC3339 UTC reference, collapsed by office, VTEC event, UGC list, and event family. `--format tool-result` wraps the report in a `wx.tool_result.v1` envelope with `artifacts`, `evidence`, `limitations`, and `provenance`.
 
 `archive import` writes canonical bulletin records under `archive/records/` and appends a `records.tsv` manifest. Re-importing the same bulletin from raw WMO, NWWS-OI XML, or PID201 captures deduplicates by normalized bulletin content.
 

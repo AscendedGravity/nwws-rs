@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use crate::error::ParseError;
 use crate::geo::GeoPoint;
@@ -16,6 +17,7 @@ use crate::oi::NwwsOiMessage;
 use crate::product::{NwwsContent, ProductFamily, ProductSegment, SegmentTag};
 use crate::runtime::semantic_fingerprint;
 use crate::ugc::{UgcCode, UgcKind, UgcString};
+use crate::vtec::{Phenomenon, Pvtec, Significance, VtecAction, VtecTime};
 
 pub type Result<T> = std::result::Result<T, ApiError>;
 
@@ -24,6 +26,7 @@ pub enum ApiError {
     Parse(ParseError),
     Io(io::Error),
     Json(serde_json::Error),
+    Time(time::error::Parse),
 }
 
 impl From<ParseError> for ApiError {
@@ -44,12 +47,19 @@ impl From<serde_json::Error> for ApiError {
     }
 }
 
+impl From<time::error::Parse> for ApiError {
+    fn from(value: time::error::Parse) -> Self {
+        Self::Time(value)
+    }
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parse(err) => write!(f, "{err}"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "{err}"),
+            Self::Time(err) => write!(f, "{err}"),
         }
     }
 }
@@ -412,6 +422,57 @@ pub struct ArchiveVerifyReport {
     pub records: Vec<ArchiveVerifyRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveWarningRecord {
+    pub key: String,
+    pub source_path: PathBuf,
+    pub message_index: usize,
+    pub segment_index: usize,
+    pub vtec_index: usize,
+    pub heading: String,
+    pub issued_at: Option<String>,
+    pub office: String,
+    pub message_office: String,
+    pub awips_id: Option<String>,
+    pub product_family: String,
+    pub event_family: String,
+    pub event_class: String,
+    pub action: String,
+    pub phenomenon: String,
+    pub significance: String,
+    pub event_tracking_number: u16,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub vtec: String,
+    pub ugc_raw: String,
+    pub ugcs: Vec<String>,
+    pub headline: Option<String>,
+    pub raw_bulletin_blake3: String,
+    pub archive_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveWarningFailure {
+    pub path: PathBuf,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveWarningReport {
+    pub root: PathBuf,
+    pub reference_utc: String,
+    pub scanned_files: usize,
+    pub parsed_files: usize,
+    pub messages: usize,
+    pub warning_vtec_segments: usize,
+    pub future_messages: usize,
+    pub active_records: usize,
+    pub failures: usize,
+    pub families: BTreeMap<String, usize>,
+    pub records: Vec<ActiveWarningRecord>,
+    pub errors: Vec<ActiveWarningFailure>,
+}
+
 pub fn inspect_path(
     path: impl AsRef<Path>,
     hint_override: Option<IngestHint>,
@@ -525,6 +586,96 @@ pub fn scan_path(path: impl AsRef<Path>, hint_override: Option<IngestHint>) -> R
         families,
         files: results,
     })
+}
+
+pub fn active_warnings_at(
+    path: impl AsRef<Path>,
+    reference_utc: &str,
+    hint_override: Option<IngestHint>,
+) -> Result<ActiveWarningReport> {
+    let reference = parse_reference_utc(reference_utc)?;
+    active_warnings_at_time(path, reference, hint_override)
+}
+
+pub fn active_warnings_at_time(
+    path: impl AsRef<Path>,
+    reference_utc: OffsetDateTime,
+    hint_override: Option<IngestHint>,
+) -> Result<ActiveWarningReport> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Err(io::Error::new(
+            IoErrorKind::NotFound,
+            format!("path does not exist: {}", path.display()),
+        )
+        .into());
+    }
+
+    let root = if path.is_file() {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    } else {
+        resolve_scan_root(path)
+    };
+    let files = collect_inputs(path)?;
+    let reference_utc = reference_utc.to_offset(UtcOffset::UTC);
+    let reference = primitive_utc(reference_utc);
+    let reference_text = format_primitive_utc(reference);
+    let mut states = BTreeMap::<String, ActiveWarningState>::new();
+    let mut report = ActiveWarningReport {
+        root: root.clone(),
+        reference_utc: reference_text,
+        scanned_files: 0,
+        parsed_files: 0,
+        messages: 0,
+        warning_vtec_segments: 0,
+        future_messages: 0,
+        active_records: 0,
+        failures: 0,
+        families: BTreeMap::new(),
+        records: Vec::new(),
+        errors: Vec::new(),
+    };
+
+    for file in files {
+        report.scanned_files += 1;
+        match inspect_path(&file, hint_override) {
+            Ok(inspection) => {
+                report.parsed_files += 1;
+                report.messages += inspection.messages.len();
+                collect_active_warning_states(
+                    &root,
+                    &file,
+                    &inspection,
+                    reference,
+                    &mut report,
+                    &mut states,
+                );
+            }
+            Err(err) => {
+                report.failures += 1;
+                report.errors.push(ActiveWarningFailure {
+                    path: relative_display_path(&root, &file),
+                    error: err.to_string(),
+                });
+            }
+        }
+    }
+
+    report.records = states
+        .into_values()
+        .filter_map(|state| state.record)
+        .collect();
+    report.active_records = report.records.len();
+    for record in &report.records {
+        *report
+            .families
+            .entry(record.event_family.clone())
+            .or_default() += 1;
+    }
+
+    Ok(report)
 }
 
 pub fn split_pid201_bytes(bytes: &[u8]) -> Result<Pid201SplitReport> {
@@ -845,6 +996,264 @@ fn split_pid201_impl(source_path: Option<PathBuf>, bytes: &[u8]) -> Result<Pid20
         pending_bytes: stream.pending.len(),
         records,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveWarningSortKey {
+    issued_at: Option<PrimitiveDateTime>,
+    source_path: PathBuf,
+    message_index: usize,
+    segment_index: usize,
+    vtec_index: usize,
+}
+
+impl PartialOrd for ActiveWarningSortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ActiveWarningSortKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (
+            self.issued_at,
+            &self.source_path,
+            self.message_index,
+            self.segment_index,
+            self.vtec_index,
+        )
+            .cmp(&(
+                other.issued_at,
+                &other.source_path,
+                other.message_index,
+                other.segment_index,
+                other.vtec_index,
+            ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActiveWarningState {
+    sort_key: ActiveWarningSortKey,
+    record: Option<ActiveWarningRecord>,
+}
+
+fn collect_active_warning_states(
+    root: &Path,
+    file: &Path,
+    inspection: &InspectionReport,
+    reference: PrimitiveDateTime,
+    report: &mut ActiveWarningReport,
+    states: &mut BTreeMap<String, ActiveWarningState>,
+) {
+    let relative_path = relative_display_path(root, file);
+
+    for (message_index, message) in inspection.messages.iter().enumerate() {
+        let issued_at = infer_wmo_issue_time(&message.yygggg, reference);
+        if issued_at.is_some_and(|issued_at| issued_at > reference) {
+            report.future_messages += 1;
+            continue;
+        }
+
+        for (segment_index, segment) in message.segments.iter().enumerate() {
+            for (vtec_index, raw_vtec) in segment.pvtec.iter().enumerate() {
+                let pvtec = match Pvtec::parse(raw_vtec) {
+                    Ok(pvtec) => pvtec,
+                    Err(err) => {
+                        report.failures += 1;
+                        report.errors.push(ActiveWarningFailure {
+                            path: relative_path.clone(),
+                            error: format!("failed to reparse P-VTEC {raw_vtec}: {err}"),
+                        });
+                        continue;
+                    }
+                };
+                if pvtec.significance() != Significance::Warning {
+                    continue;
+                }
+
+                report.warning_vtec_segments += 1;
+                let event_family =
+                    family_name_for_phenomenon(pvtec.phenomenon()).unwrap_or(&message.family);
+                let key = active_warning_key(&pvtec, &segment.ugcs, event_family);
+                let sort_key = ActiveWarningSortKey {
+                    issued_at,
+                    source_path: relative_path.clone(),
+                    message_index: message_index + 1,
+                    segment_index: segment_index + 1,
+                    vtec_index: vtec_index + 1,
+                };
+
+                if matches!(pvtec.action(), VtecAction::Cancel | VtecAction::Expire) {
+                    upsert_active_warning_state(states, key, sort_key, None);
+                    continue;
+                }
+
+                if !vtec_window_contains(&pvtec, reference) {
+                    continue;
+                }
+
+                let record = ActiveWarningRecord {
+                    key: key.clone(),
+                    source_path: relative_path.clone(),
+                    message_index: message_index + 1,
+                    segment_index: segment_index + 1,
+                    vtec_index: vtec_index + 1,
+                    heading: message.heading.clone(),
+                    issued_at: issued_at.map(format_primitive_utc),
+                    office: pvtec.office_id().to_owned(),
+                    message_office: message.office.clone(),
+                    awips_id: message.awips_id.clone(),
+                    product_family: message.family.clone(),
+                    event_family: event_family.to_owned(),
+                    event_class: pvtec.event_class().as_str().to_owned(),
+                    action: pvtec.action().as_str().to_owned(),
+                    phenomenon: pvtec.phenomenon().as_str().to_owned(),
+                    significance: pvtec.significance().as_str().to_owned(),
+                    event_tracking_number: pvtec.event_tracking_number(),
+                    start_time: format_vtec_time(pvtec.start_time()),
+                    end_time: format_vtec_time(pvtec.end_time()),
+                    vtec: pvtec.raw().to_owned(),
+                    ugc_raw: segment.ugc_raw.clone(),
+                    ugcs: segment.ugcs.clone(),
+                    headline: segment.headline.clone(),
+                    raw_bulletin_blake3: message.raw_bulletin_blake3.clone(),
+                    archive_id: message.archive_id.clone(),
+                };
+                upsert_active_warning_state(states, key, sort_key, Some(record));
+            }
+        }
+    }
+}
+
+fn upsert_active_warning_state(
+    states: &mut BTreeMap<String, ActiveWarningState>,
+    key: String,
+    sort_key: ActiveWarningSortKey,
+    record: Option<ActiveWarningRecord>,
+) {
+    if let Some(existing) = states.get(&key)
+        && existing.sort_key > sort_key
+    {
+        return;
+    }
+
+    states.insert(key, ActiveWarningState { sort_key, record });
+}
+
+fn vtec_window_contains(pvtec: &Pvtec, reference: PrimitiveDateTime) -> bool {
+    if let Some(start) = pvtec.start_time().datetime()
+        && reference < start
+    {
+        return false;
+    }
+    if let Some(end) = pvtec.end_time().datetime()
+        && reference >= end
+    {
+        return false;
+    }
+    true
+}
+
+fn active_warning_key(pvtec: &Pvtec, ugcs: &[String], event_family: &str) -> String {
+    let ugc_key = if ugcs.is_empty() {
+        "UNKNOWN".to_owned()
+    } else {
+        ugcs.join(",")
+    };
+    format!(
+        "office={}|vtec={}.{}.{}.{:04}|ugc={}|family={}",
+        pvtec.office_id(),
+        pvtec.event_class().as_str(),
+        pvtec.phenomenon().as_str(),
+        pvtec.significance().as_str(),
+        pvtec.event_tracking_number(),
+        ugc_key,
+        event_family
+    )
+}
+
+fn parse_reference_utc(raw: &str) -> Result<OffsetDateTime> {
+    Ok(OffsetDateTime::parse(raw, &Rfc3339)?.to_offset(UtcOffset::UTC))
+}
+
+fn primitive_utc(value: OffsetDateTime) -> PrimitiveDateTime {
+    PrimitiveDateTime::new(value.date(), value.time())
+}
+
+fn infer_wmo_issue_time(yygggg: &str, reference: PrimitiveDateTime) -> Option<PrimitiveDateTime> {
+    let bytes = yygggg.as_bytes();
+    if bytes.len() != 6 || !bytes.iter().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let day = ascii_dec(bytes[0], bytes[1]);
+    let hour = ascii_dec(bytes[2], bytes[3]);
+    let minute = ascii_dec(bytes[4], bytes[5]);
+    let time = Time::from_hms(hour, minute, 0).ok()?;
+    let mut best: Option<(u64, bool, PrimitiveDateTime)> = None;
+
+    for month_offset in [-1, 0, 1] {
+        let (year, month) = month_with_offset(reference.year(), reference.month(), month_offset)?;
+        let Ok(date) = Date::from_calendar_date(year, month, day) else {
+            continue;
+        };
+        let candidate = PrimitiveDateTime::new(date, time);
+        let delta = (candidate - reference).whole_seconds();
+        let distance = delta.unsigned_abs();
+        let is_future = candidate > reference;
+        if best.is_none_or(|(best_distance, best_is_future, _)| {
+            distance < best_distance || (distance == best_distance && best_is_future && !is_future)
+        }) {
+            best = Some((distance, is_future, candidate));
+        }
+    }
+
+    best.map(|(_, _, candidate)| candidate)
+}
+
+fn month_with_offset(year: i32, month: Month, offset: i8) -> Option<(i32, Month)> {
+    let mut year = year;
+    let mut month = month as i8 + offset;
+    while month < 1 {
+        month += 12;
+        year -= 1;
+    }
+    while month > 12 {
+        month -= 12;
+        year += 1;
+    }
+    Month::try_from(month as u8).ok().map(|month| (year, month))
+}
+
+fn format_vtec_time(value: VtecTime) -> Option<String> {
+    value.datetime().map(format_primitive_utc)
+}
+
+fn format_primitive_utc(value: PrimitiveDateTime) -> String {
+    value
+        .assume_utc()
+        .format(&Rfc3339)
+        .expect("UTC primitive datetimes can be formatted as RFC3339")
+}
+
+fn family_name_for_phenomenon(phenomenon: Phenomenon) -> Option<&'static str> {
+    match phenomenon {
+        Phenomenon::Tornado => Some("tornado"),
+        Phenomenon::SevereThunderstorm => Some("severe-thunderstorm"),
+        Phenomenon::FlashFlood => Some("flash-flood"),
+        Phenomenon::Flood | Phenomenon::FloodForecastPoint => Some("flood"),
+        Phenomenon::Marine
+        | Phenomenon::SmallCraft
+        | Phenomenon::Gale
+        | Phenomenon::Storm
+        | Phenomenon::HurricaneForceWind => Some("marine"),
+        _ => None,
+    }
+}
+
+fn ascii_dec(tens: u8, ones: u8) -> u8 {
+    (tens - b'0') * 10 + (ones - b'0')
 }
 
 fn verify_archived_file(records_root: &Path, file: &Path) -> Result<ArchiveVerifyRecord> {
@@ -1257,8 +1666,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        archive_import, archive_verify, inspect_bytes, scan_path, split_pid201_bytes,
-        write_pid201_split,
+        active_warnings_at, archive_import, archive_verify, inspect_bytes, scan_path,
+        split_pid201_bytes, write_pid201_split,
     };
     use crate::ingest::IngestHint;
 
@@ -1359,6 +1768,72 @@ mod tests {
         let verify = archive_verify(&archive_dir).unwrap();
         assert_eq!(verify.verified_records, 1);
         assert_eq!(verify.failures, 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_warnings_at_collapses_updates_by_event_key() {
+        let root = temp_dir_path("nwws_rs_api_active_at");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("warning.txt"),
+            include_str!("../tests/fixtures/wmo_tornado_warning.txt"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("svs.txt"),
+            include_str!("../tests/fixtures/wmo_segmented_svs.txt"),
+        )
+        .unwrap();
+
+        let report =
+            active_warnings_at(&root, "2026-04-21T16:25:00Z", Some(IngestHint::RawBulletin))
+                .unwrap();
+
+        assert_eq!(report.scanned_files, 2);
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.active_records, 2);
+        assert_eq!(report.families.get("tornado"), Some(&1));
+        assert_eq!(report.families.get("severe-thunderstorm"), Some(&1));
+
+        let tornado = report
+            .records
+            .iter()
+            .find(|record| record.event_family == "tornado")
+            .unwrap();
+        assert_eq!(tornado.action, "CON");
+        assert_eq!(tornado.product_family, "statement");
+        assert_eq!(tornado.event_tracking_number, 1);
+        assert!(tornado.key.contains("KLOT"));
+        assert!(tornado.key.contains("TO.W.0001"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_warnings_at_honors_reference_before_future_updates() {
+        let root = temp_dir_path("nwws_rs_api_active_at_future");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("warning.txt"),
+            include_str!("../tests/fixtures/wmo_tornado_warning.txt"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("svs.txt"),
+            include_str!("../tests/fixtures/wmo_segmented_svs.txt"),
+        )
+        .unwrap();
+
+        let report =
+            active_warnings_at(&root, "2026-04-21T16:10:00Z", Some(IngestHint::RawBulletin))
+                .unwrap();
+
+        assert_eq!(report.active_records, 1);
+        assert_eq!(report.future_messages, 1);
+        assert_eq!(report.records[0].action, "NEW");
+        assert_eq!(report.records[0].event_family, "tornado");
 
         fs::remove_dir_all(root).unwrap();
     }

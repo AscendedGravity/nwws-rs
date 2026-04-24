@@ -21,13 +21,14 @@ pub mod wmo;
 mod python;
 
 pub use api::{
-    ApiError, ArchiveFailure, ArchiveImportReport, ArchivePersistResult, ArchiveVerifyRecord,
-    ArchiveVerifyReport, ByteRange, InputKind, InspectionReport, MessageSummary, Pid201SplitRecord,
-    Pid201SplitReport, Pid201WriteRecord, Pid201WriteReport, PointSummary, Result as ApiResult,
-    ScanCount, ScanFileResult, ScanReport, SegmentSummary, TimeMotLocSummary, TransportSummary,
-    WrapperSummary, archive_import, archive_verify, inspect_bytes, inspect_oi_message,
-    inspect_path, inspect_text, scan_path, split_pid201_bytes, split_pid201_path, to_json,
-    write_pid201_split,
+    ActiveWarningFailure, ActiveWarningRecord, ActiveWarningReport, ApiError, ArchiveFailure,
+    ArchiveImportReport, ArchivePersistResult, ArchiveVerifyRecord, ArchiveVerifyReport, ByteRange,
+    InputKind, InspectionReport, MessageSummary, Pid201SplitRecord, Pid201SplitReport,
+    Pid201WriteRecord, Pid201WriteReport, PointSummary, Result as ApiResult, ScanCount,
+    ScanFileResult, ScanReport, SegmentSummary, TimeMotLocSummary, TransportSummary,
+    WrapperSummary, active_warnings_at, active_warnings_at_time, archive_import, archive_verify,
+    inspect_bytes, inspect_oi_message, inspect_path, inspect_text, scan_path, split_pid201_bytes,
+    split_pid201_path, to_json, write_pid201_split,
 };
 pub use error::{ErrorKind, ParseError, Result};
 pub use geo::{LatLonBlock, MotionLocation, TimeMotLoc};

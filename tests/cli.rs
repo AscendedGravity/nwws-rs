@@ -41,6 +41,7 @@ fn help_mentions_pid201_and_archive_commands() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("pid201 split"));
+    assert!(stdout.contains("active-at"));
     assert!(stdout.contains("archive import"));
     assert!(stdout.contains("archive verify"));
     assert!(stdout.contains("--format <text|json|jsonl|tool-result>"));
@@ -293,6 +294,65 @@ fn archive_verify_tool_result_wraps_machine_report() {
     assert_eq!(
         payload["provenance"]["archive_dir"].as_str().unwrap(),
         archive_dir.display().to_string()
+    );
+
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn active_at_tool_result_returns_archive_warning_state() {
+    let temp = temp_dir_path("nwws_rs_cli_active_at_tool_result");
+    let input_dir = temp.join("input");
+    let archive_dir = temp.join("archive");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::copy(
+        fixture_path("wmo_tornado_warning.txt"),
+        input_dir.join("warning.txt"),
+    )
+    .unwrap();
+    fs::copy(
+        fixture_path("wmo_segmented_svs.txt"),
+        input_dir.join("svs.txt"),
+    )
+    .unwrap();
+
+    let import = Command::new(bin_path())
+        .args(["archive", "import"])
+        .arg(&input_dir)
+        .arg(&archive_dir)
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+
+    assert!(import.status.success(), "{:?}", import);
+
+    let active = Command::new(bin_path())
+        .args(["archive", "active-at"])
+        .arg(&archive_dir)
+        .args(["--at", "2026-04-21T16:25:00Z"])
+        .args(["--format", "tool-result"])
+        .output()
+        .unwrap();
+
+    assert!(active.status.success(), "{:?}", active);
+    let payload: Value = serde_json::from_slice(&active.stdout).unwrap();
+    assert_eq!(payload["schema_version"], "wx.tool_result.v1");
+    assert_eq!(payload["tool_name"], "warning.active_at_reference");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["inputs"]["reference_utc"], "2026-04-21T16:25:00Z");
+    assert_eq!(payload["data"]["active_records"], 2);
+
+    let records = payload["data"]["records"].as_array().unwrap();
+    let tornado = records
+        .iter()
+        .find(|record| record["event_family"] == "tornado")
+        .unwrap();
+    assert_eq!(tornado["action"], "CON");
+    assert_eq!(tornado["product_family"], "statement");
+    assert!(tornado["key"].as_str().unwrap().contains("TO.W.0001"));
+    assert_eq!(
+        payload["evidence"][0]["evidence_type"],
+        "active_warning_records"
     );
 
     fs::remove_dir_all(temp).unwrap();

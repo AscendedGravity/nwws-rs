@@ -223,6 +223,57 @@ class ArchiveVerifyReport:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveWarningRecord:
+    key: str
+    source_path: Path
+    message_index: int
+    segment_index: int
+    vtec_index: int
+    heading: str
+    issued_at: Optional[str]
+    office: str
+    message_office: str
+    awips_id: Optional[str]
+    product_family: str
+    event_family: str
+    event_class: str
+    action: str
+    phenomenon: str
+    significance: str
+    event_tracking_number: int
+    start_time: Optional[str]
+    end_time: Optional[str]
+    vtec: str
+    ugc_raw: str
+    ugcs: tuple[str, ...]
+    headline: Optional[str]
+    raw_bulletin_blake3: str
+    archive_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveWarningFailure:
+    path: Path
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveWarningReport:
+    root: Path
+    reference_utc: str
+    scanned_files: int
+    parsed_files: int
+    messages: int
+    warning_vtec_segments: int
+    future_messages: int
+    active_records: int
+    failures: int
+    families: dict[str, int]
+    records: tuple[ActiveWarningRecord, ...]
+    errors: tuple[ActiveWarningFailure, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Pid201PushRecord:
     offset: int
     leading_junk_prefix: int
@@ -464,6 +515,60 @@ def _decode_archive_verify(payload: Mapping[str, Any]) -> ArchiveVerifyReport:
     )
 
 
+def _decode_active_warning_record(payload: Mapping[str, Any]) -> ActiveWarningRecord:
+    return ActiveWarningRecord(
+        key=payload["key"],
+        source_path=Path(payload["source_path"]),
+        message_index=payload["message_index"],
+        segment_index=payload["segment_index"],
+        vtec_index=payload["vtec_index"],
+        heading=payload["heading"],
+        issued_at=payload["issued_at"],
+        office=payload["office"],
+        message_office=payload["message_office"],
+        awips_id=payload["awips_id"],
+        product_family=payload["product_family"],
+        event_family=payload["event_family"],
+        event_class=payload["event_class"],
+        action=payload["action"],
+        phenomenon=payload["phenomenon"],
+        significance=payload["significance"],
+        event_tracking_number=payload["event_tracking_number"],
+        start_time=payload["start_time"],
+        end_time=payload["end_time"],
+        vtec=payload["vtec"],
+        ugc_raw=payload["ugc_raw"],
+        ugcs=tuple(payload["ugcs"]),
+        headline=payload["headline"],
+        raw_bulletin_blake3=payload["raw_bulletin_blake3"],
+        archive_id=payload["archive_id"],
+    )
+
+
+def _decode_active_warning_failure(payload: Mapping[str, Any]) -> ActiveWarningFailure:
+    return ActiveWarningFailure(
+        path=Path(payload["path"]),
+        error=payload["error"],
+    )
+
+
+def _decode_active_warning_report(payload: Mapping[str, Any]) -> ActiveWarningReport:
+    return ActiveWarningReport(
+        root=Path(payload["root"]),
+        reference_utc=payload["reference_utc"],
+        scanned_files=payload["scanned_files"],
+        parsed_files=payload["parsed_files"],
+        messages=payload["messages"],
+        warning_vtec_segments=payload["warning_vtec_segments"],
+        future_messages=payload["future_messages"],
+        active_records=payload["active_records"],
+        failures=payload["failures"],
+        families=dict(payload["families"]),
+        records=tuple(_decode_active_warning_record(value) for value in payload["records"]),
+        errors=tuple(_decode_active_warning_failure(value) for value in payload["errors"]),
+    )
+
+
 def _decode_pid201_push_record(payload: Mapping[str, Any]) -> Pid201PushRecord:
     return Pid201PushRecord(
         offset=payload["offset"],
@@ -567,6 +672,15 @@ def archive_verify(archive_dir: PathLike) -> ArchiveVerifyReport:
     return _decode_archive_verify(payload)
 
 
+def active_warnings_at(
+    path: PathLike,
+    reference_utc: str,
+    hint: Optional[Union[Hint, str]] = None,
+) -> ActiveWarningReport:
+    payload = _loads(_native.active_warnings_at_json(str(path), reference_utc, _coerce_hint(hint)))
+    return _decode_active_warning_report(payload)
+
+
 def semantic_fingerprint(message: Message) -> str:
     return message.semantic_fingerprint
 
@@ -659,6 +773,9 @@ __all__ = [
     "ArchivePersistResult",
     "ArchiveVerifyRecord",
     "ArchiveVerifyReport",
+    "ActiveWarningFailure",
+    "ActiveWarningRecord",
+    "ActiveWarningReport",
     "ByteRange",
     "Hint",
     "InputKind",
@@ -683,6 +800,7 @@ __all__ = [
     "TimeMotLoc",
     "TransportInfo",
     "WrapperSummary",
+    "active_warnings_at",
     "archive_import",
     "archive_verify",
     "collect_input_paths",
