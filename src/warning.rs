@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, ErrorKind as IoErrorKind};
 use std::ops::Range;
@@ -223,11 +223,19 @@ pub struct WarningTimelineReport {
 
 pub const AREA_TIME_POLYGON_METRICS_SCHEMA: &str = "warning.area_time_polygon_metrics.v1";
 pub const AREA_TIME_POLYGON_METRICS_METHOD: &str = "planar-lon-lat-shoelace-convex-clip-v1";
+pub const LEAD_TIME_EVENT_METRICS_SCHEMA: &str = "warning.lead_time_event_metrics.v1";
+pub const LEAD_TIME_EVENT_METRICS_METHOD: &str = "timeline-point-in-polygon-half-open-interval-v1";
 
 const AREA_TIME_POLYGON_METRICS_LIMITATIONS: &[&str] = &[
     "Polygon area is computed in lon/lat square-degrees; it is not geodesic or equal-area.",
     "Polygon overlap uses deterministic planar clipping and is returned only for simple convex polygons.",
     "Dateline, pole, and earth-curvature effects are not modeled.",
+];
+
+const LEAD_TIME_EVENT_METRICS_LIMITATIONS: &[&str] = &[
+    "Point-in-polygon tests use planar lon/lat coordinates; they are not geodesic.",
+    "Warning intervals are interpreted as half-open [start, end) UTC intervals.",
+    "False-alarm hooks treat merged point-warning intervals that do not contain the supplied event timestamp as unmatched; full false-alarm verification requires a complete truth-event set.",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -258,6 +266,44 @@ pub struct WarningAreaTimePolygonMetrics {
     pub overlap_area_time_square_degree_seconds: Option<f64>,
     pub union_area_time_square_degree_seconds: Option<f64>,
     pub area_time_overlap_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WarningLeadTimeQualityFlag {
+    NoWarningRecords,
+    MissingWarningInterval,
+    MissingWarningPolygon,
+    InvalidWarningPolygon,
+    NoPointWarningIntervals,
+    EventOutsidePointWarningIntervals,
+    WarningIssuedAfterEvent,
+    MissedEvent,
+    FalseAlarmIntervalsPresent,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WarningLeadTimeEventMetrics {
+    pub schema: &'static str,
+    pub method: &'static str,
+    pub limitations: Vec<&'static str>,
+    pub event_time_utc: String,
+    pub event_point: WarningPoint,
+    pub warning_records: usize,
+    pub point_warning_records: usize,
+    pub event_warning_records: usize,
+    pub point_warning_interval_count: usize,
+    pub point_warning_duration_seconds: i64,
+    pub first_valid_warning_record_key: Option<String>,
+    pub first_valid_warning_event_id: Option<String>,
+    pub first_valid_warning_lead_start_utc: Option<String>,
+    pub first_valid_warning_interval_start_utc: Option<String>,
+    pub first_valid_warning_interval_end_utc: Option<String>,
+    pub lead_time_seconds: Option<i64>,
+    pub missed_event: bool,
+    pub false_alarm_interval_count: usize,
+    pub false_alarm_duration_seconds: i64,
+    pub quality_flags: Vec<WarningLeadTimeQualityFlag>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -299,6 +345,13 @@ struct WarningInterval {
 struct PlanarPoint {
     x: f64,
     y: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LeadTimeCandidate<'a> {
+    record: &'a WarningTimelineRecord,
+    interval: WarningInterval,
+    lead_start: PrimitiveDateTime,
 }
 
 pub fn polygon_timeline(
@@ -420,6 +473,146 @@ pub fn area_time_polygon_metric_limitations() -> &'static [&'static str] {
     AREA_TIME_POLYGON_METRICS_LIMITATIONS
 }
 
+pub fn lead_time_event_metric_limitations() -> &'static [&'static str] {
+    LEAD_TIME_EVENT_METRICS_LIMITATIONS
+}
+
+pub fn lead_time_event_metrics(
+    records: &[WarningTimelineRecord],
+    event_time_utc: &str,
+    event_point: &WarningPoint,
+) -> Result<WarningLeadTimeEventMetrics> {
+    let event_time = parse_reference_utc(event_time_utc)?;
+    Ok(lead_time_event_metrics_at_time(
+        records,
+        event_time,
+        event_point,
+    ))
+}
+
+pub fn lead_time_event_metrics_at_time(
+    records: &[WarningTimelineRecord],
+    event_time_utc: OffsetDateTime,
+    event_point: &WarningPoint,
+) -> WarningLeadTimeEventMetrics {
+    let event_time = primitive_utc(event_time_utc);
+    let mut quality_flags = BTreeSet::new();
+    let mut point_warning_records = 0usize;
+    let mut event_warning_records = 0usize;
+    let mut point_intervals = Vec::new();
+    let mut first_valid_warning = None;
+
+    if records.is_empty() {
+        quality_flags.insert(WarningLeadTimeQualityFlag::NoWarningRecords);
+    }
+
+    for record in records {
+        if !lead_time_record_can_warn(record) {
+            continue;
+        }
+
+        let Some(interval) = warning_interval(record) else {
+            quality_flags.insert(WarningLeadTimeQualityFlag::MissingWarningInterval);
+            continue;
+        };
+        let Some(polygon) = record.polygon.as_ref() else {
+            quality_flags.insert(WarningLeadTimeQualityFlag::MissingWarningPolygon);
+            continue;
+        };
+        let Some(contains_point) = warning_polygon_contains_point(polygon, event_point) else {
+            quality_flags.insert(WarningLeadTimeQualityFlag::InvalidWarningPolygon);
+            continue;
+        };
+        if !contains_point {
+            continue;
+        }
+
+        point_warning_records += 1;
+        point_intervals.push(interval);
+
+        if !interval.contains(event_time) {
+            continue;
+        }
+
+        let lead_start = warning_lead_start(record, interval);
+        if lead_start > event_time {
+            quality_flags.insert(WarningLeadTimeQualityFlag::WarningIssuedAfterEvent);
+            continue;
+        }
+
+        event_warning_records += 1;
+        let candidate = LeadTimeCandidate {
+            record,
+            interval,
+            lead_start,
+        };
+        if first_valid_warning.is_none_or(|existing| {
+            lead_time_candidate_sort_key(candidate) < lead_time_candidate_sort_key(existing)
+        }) {
+            first_valid_warning = Some(candidate);
+        }
+    }
+
+    let point_intervals = merge_warning_intervals(point_intervals);
+    let point_warning_duration_seconds = point_intervals
+        .iter()
+        .map(|interval| interval.duration_seconds())
+        .sum();
+    let false_alarm_intervals = point_intervals
+        .iter()
+        .copied()
+        .filter(|interval| !interval.contains(event_time))
+        .collect::<Vec<_>>();
+    let false_alarm_duration_seconds = false_alarm_intervals
+        .iter()
+        .map(|interval| interval.duration_seconds())
+        .sum();
+
+    if point_intervals.is_empty() && !records.is_empty() {
+        quality_flags.insert(WarningLeadTimeQualityFlag::NoPointWarningIntervals);
+    }
+    if !point_intervals.is_empty() && event_warning_records == 0 {
+        quality_flags.insert(WarningLeadTimeQualityFlag::EventOutsidePointWarningIntervals);
+    }
+    if !false_alarm_intervals.is_empty() {
+        quality_flags.insert(WarningLeadTimeQualityFlag::FalseAlarmIntervalsPresent);
+    }
+
+    let missed_event = first_valid_warning.is_none();
+    if missed_event {
+        quality_flags.insert(WarningLeadTimeQualityFlag::MissedEvent);
+    }
+
+    WarningLeadTimeEventMetrics {
+        schema: LEAD_TIME_EVENT_METRICS_SCHEMA,
+        method: LEAD_TIME_EVENT_METRICS_METHOD,
+        limitations: lead_time_event_metric_limitations().to_vec(),
+        event_time_utc: format_offset_utc(event_time_utc),
+        event_point: event_point.clone(),
+        warning_records: records.len(),
+        point_warning_records,
+        event_warning_records,
+        point_warning_interval_count: point_intervals.len(),
+        point_warning_duration_seconds,
+        first_valid_warning_record_key: first_valid_warning
+            .map(|candidate| candidate.record.record_key.clone()),
+        first_valid_warning_event_id: first_valid_warning
+            .map(|candidate| candidate.record.event_id.clone()),
+        first_valid_warning_lead_start_utc: first_valid_warning
+            .map(|candidate| format_primitive_utc(candidate.lead_start)),
+        first_valid_warning_interval_start_utc: first_valid_warning
+            .map(|candidate| format_primitive_utc(candidate.interval.start)),
+        first_valid_warning_interval_end_utc: first_valid_warning
+            .map(|candidate| format_primitive_utc(candidate.interval.end)),
+        lead_time_seconds: first_valid_warning
+            .map(|candidate| (event_time - candidate.lead_start).whole_seconds()),
+        missed_event,
+        false_alarm_interval_count: false_alarm_intervals.len(),
+        false_alarm_duration_seconds,
+        quality_flags: quality_flags.into_iter().collect(),
+    }
+}
+
 pub fn warning_interval_duration_seconds(record: &WarningTimelineRecord) -> Option<i64> {
     warning_interval(record).map(|interval| interval.duration_seconds())
 }
@@ -460,6 +653,25 @@ pub fn warning_polygon_overlap_area_square_degrees(
     }
 
     Some(shoelace_area(&clipped))
+}
+
+pub fn warning_polygon_contains_point(
+    polygon: &WarningPolygon,
+    point: &WarningPoint,
+) -> Option<bool> {
+    let points = normalized_planar_points(&polygon.points)?;
+    let target = PlanarPoint {
+        x: f64::from(point.lon),
+        y: f64::from(point.lat),
+    };
+    if !target.x.is_finite() || !target.y.is_finite() {
+        return None;
+    }
+    if polygon_self_intersects(&points) || shoelace_area(&points) <= PLANAR_EPSILON {
+        return None;
+    }
+
+    Some(polygon_contains_planar_point(&points, target))
 }
 
 fn polygon_timeline_impl(
@@ -823,6 +1035,10 @@ fn latest_record_status(
 }
 
 impl WarningInterval {
+    fn contains(self, time: PrimitiveDateTime) -> bool {
+        self.start <= time && time < self.end
+    }
+
     fn duration_seconds(self) -> i64 {
         (self.end - self.start).whole_seconds()
     }
@@ -848,6 +1064,45 @@ impl WarningInterval {
 }
 
 const PLANAR_EPSILON: f64 = 1.0e-9;
+
+fn lead_time_record_can_warn(record: &WarningTimelineRecord) -> bool {
+    !matches!(record.action.as_str(), "CAN" | "EXP")
+}
+
+fn warning_lead_start(
+    record: &WarningTimelineRecord,
+    interval: WarningInterval,
+) -> PrimitiveDateTime {
+    parse_record_utc(record.issued_at.as_deref())
+        .or_else(|| parse_record_utc(record.wrapper_issued_at.as_deref()))
+        .unwrap_or(interval.start)
+}
+
+fn lead_time_candidate_sort_key<'a>(
+    candidate: LeadTimeCandidate<'a>,
+) -> (PrimitiveDateTime, &'a str) {
+    (candidate.lead_start, candidate.record.record_key.as_str())
+}
+
+fn merge_warning_intervals(mut intervals: Vec<WarningInterval>) -> Vec<WarningInterval> {
+    intervals.sort_by_key(|interval| (interval.start, interval.end));
+
+    let mut merged: Vec<WarningInterval> = Vec::new();
+    for interval in intervals {
+        if let Some(previous) = merged.last_mut()
+            && interval.start <= previous.end
+        {
+            if interval.end > previous.end {
+                previous.end = interval.end;
+            }
+            continue;
+        }
+
+        merged.push(interval);
+    }
+
+    merged
+}
 
 fn warning_interval(record: &WarningTimelineRecord) -> Option<WarningInterval> {
     let start = parse_record_utc(record.valid_start.as_deref())
@@ -1113,6 +1368,31 @@ fn dedupe_planar_points(points: Vec<PlanarPoint>) -> Vec<PlanarPoint> {
     }
 
     deduped
+}
+
+fn polygon_contains_planar_point(points: &[PlanarPoint], point: PlanarPoint) -> bool {
+    for index in 0..points.len() {
+        let start = points[index];
+        let end = points[(index + 1) % points.len()];
+        if cross(start, end, point).abs() <= PLANAR_EPSILON && on_segment(start, point, end) {
+            return true;
+        }
+    }
+
+    let mut inside = false;
+    let mut previous = *points.last().expect("checked non-empty");
+    for current in points {
+        if (current.y > point.y) != (previous.y > point.y) {
+            let intersection_x = current.x
+                + (point.y - current.y) * (previous.x - current.x) / (previous.y - current.y);
+            if point.x < intersection_x {
+                inside = !inside;
+            }
+        }
+        previous = *current;
+    }
+
+    inside
 }
 
 fn shoelace_area(points: &[PlanarPoint]) -> f64 {
@@ -1417,9 +1697,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        WarningLifecycleStatus, WarningPoint, WarningPolygon, WarningTags, WarningTimelineRecord,
-        area_time_polygon_metrics, polygon_timeline_at, warning_interval_overlap_seconds,
-        warning_polygon_area_square_degrees, warning_polygon_overlap_area_square_degrees,
+        WarningLeadTimeQualityFlag, WarningLifecycleStatus, WarningPoint, WarningPolygon,
+        WarningTags, WarningTimelineRecord, area_time_polygon_metrics, lead_time_event_metrics,
+        polygon_timeline_at, warning_interval_overlap_seconds, warning_polygon_area_square_degrees,
+        warning_polygon_contains_point, warning_polygon_overlap_area_square_degrees,
     };
     use crate::ingest::IngestHint;
     use crate::product::{WarningActionKind, WarningTextTagKind};
@@ -1521,6 +1802,111 @@ mod tests {
     }
 
     #[test]
+    fn lead_time_event_metrics_finds_first_valid_warning_before_event() {
+        let records = vec![
+            test_record(
+                "outside",
+                "KAAA.O.TO.W.0001",
+                "2026-04-21T15:50:00Z",
+                "2026-04-21T16:30:00Z",
+                square_polygon(10.0, 10.0, 11.0, 11.0),
+            ),
+            test_record(
+                "first",
+                "KAAA.O.TO.W.0001",
+                "2026-04-21T16:00:00Z",
+                "2026-04-21T16:45:00Z",
+                square_polygon(0.0, 0.0, 2.0, 2.0),
+            ),
+            test_record(
+                "update",
+                "KAAA.O.TO.W.0001",
+                "2026-04-21T16:10:00Z",
+                "2026-04-21T16:30:00Z",
+                square_polygon(0.0, 0.0, 2.0, 2.0),
+            ),
+        ];
+        let point = WarningPoint { lat: 1.0, lon: 1.0 };
+
+        let metrics = lead_time_event_metrics(&records, "2026-04-21T16:20:00Z", &point).unwrap();
+
+        assert_eq!(metrics.schema, "warning.lead_time_event_metrics.v1");
+        assert_eq!(
+            metrics.method,
+            "timeline-point-in-polygon-half-open-interval-v1"
+        );
+        assert_eq!(
+            metrics.first_valid_warning_record_key.as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            metrics.first_valid_warning_event_id.as_deref(),
+            Some("KAAA.O.TO.W.0001")
+        );
+        assert_eq!(
+            metrics.first_valid_warning_lead_start_utc.as_deref(),
+            Some("2026-04-21T16:00:00Z")
+        );
+        assert_eq!(metrics.lead_time_seconds, Some(1200));
+        assert!(!metrics.missed_event);
+        assert_eq!(metrics.point_warning_records, 2);
+        assert_eq!(metrics.event_warning_records, 2);
+        assert_eq!(metrics.point_warning_interval_count, 1);
+        assert_eq!(metrics.point_warning_duration_seconds, 2700);
+        assert_eq!(metrics.false_alarm_interval_count, 0);
+        assert_eq!(metrics.false_alarm_duration_seconds, 0);
+        assert!(metrics.quality_flags.is_empty());
+    }
+
+    #[test]
+    fn lead_time_event_metrics_reports_missed_event_and_false_alarm_hooks() {
+        let records = vec![
+            test_record(
+                "early",
+                "KAAA.O.TO.W.0001",
+                "2026-04-21T15:00:00Z",
+                "2026-04-21T15:30:00Z",
+                square_polygon(0.0, 0.0, 2.0, 2.0),
+            ),
+            test_record(
+                "late",
+                "KAAA.O.TO.W.0002",
+                "2026-04-21T17:00:00Z",
+                "2026-04-21T17:30:00Z",
+                square_polygon(0.0, 0.0, 2.0, 2.0),
+            ),
+        ];
+        let point = WarningPoint { lat: 1.0, lon: 1.0 };
+
+        let metrics = lead_time_event_metrics(&records, "2026-04-21T16:00:00Z", &point).unwrap();
+
+        assert!(metrics.missed_event);
+        assert_eq!(metrics.first_valid_warning_record_key, None);
+        assert_eq!(metrics.lead_time_seconds, None);
+        assert_eq!(metrics.point_warning_records, 2);
+        assert_eq!(metrics.event_warning_records, 0);
+        assert_eq!(metrics.point_warning_interval_count, 2);
+        assert_eq!(metrics.point_warning_duration_seconds, 3600);
+        assert_eq!(metrics.false_alarm_interval_count, 2);
+        assert_eq!(metrics.false_alarm_duration_seconds, 3600);
+        assert!(
+            metrics
+                .quality_flags
+                .contains(&WarningLeadTimeQualityFlag::EventOutsidePointWarningIntervals)
+        );
+        assert!(
+            metrics
+                .quality_flags
+                .contains(&WarningLeadTimeQualityFlag::MissedEvent)
+        );
+        assert!(
+            metrics
+                .quality_flags
+                .contains(&WarningLeadTimeQualityFlag::FalseAlarmIntervalsPresent)
+        );
+    }
+
+    #[test]
     fn polygon_overlap_skips_self_intersecting_shapes() {
         let bowtie = polygon(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)]);
         let square = square_polygon(0.0, 0.0, 3.0, 3.0);
@@ -1528,6 +1914,29 @@ mod tests {
         assert_eq!(warning_polygon_area_square_degrees(&bowtie), None);
         assert_eq!(
             warning_polygon_overlap_area_square_degrees(&bowtie, &square),
+            None
+        );
+    }
+
+    #[test]
+    fn polygon_contains_point_uses_simple_planar_geometry() {
+        let square = square_polygon(0.0, 0.0, 2.0, 2.0);
+        assert_eq!(
+            warning_polygon_contains_point(&square, &WarningPoint { lat: 1.0, lon: 1.0 }),
+            Some(true)
+        );
+        assert_eq!(
+            warning_polygon_contains_point(&square, &WarningPoint { lat: 0.0, lon: 1.0 }),
+            Some(true)
+        );
+        assert_eq!(
+            warning_polygon_contains_point(&square, &WarningPoint { lat: 3.0, lon: 1.0 }),
+            Some(false)
+        );
+
+        let bowtie = polygon(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0)]);
+        assert_eq!(
+            warning_polygon_contains_point(&bowtie, &WarningPoint { lat: 1.0, lon: 1.0 }),
             None
         );
     }

@@ -63,12 +63,16 @@ pub use ugc::{UgcCode, UgcPurgeTime, UgcString};
 pub use vtec::{EventClass, Hvtec, Phenomenon, Pvtec, Significance, VtecAction};
 pub use warning::{
     AREA_TIME_POLYGON_METRICS_METHOD, AREA_TIME_POLYGON_METRICS_SCHEMA,
-    WarningAreaTimePolygonMetrics, WarningByteRange, WarningLifecycleStatus, WarningPoint,
-    WarningPolygon, WarningTags, WarningTimeMotion, WarningTimelineFailure, WarningTimelineRecord,
-    WarningTimelineReport, area_time_polygon_metric_limitations, area_time_polygon_metrics,
+    LEAD_TIME_EVENT_METRICS_METHOD, LEAD_TIME_EVENT_METRICS_SCHEMA, WarningAreaTimePolygonMetrics,
+    WarningByteRange, WarningLeadTimeEventMetrics, WarningLeadTimeQualityFlag,
+    WarningLifecycleStatus, WarningPoint, WarningPolygon, WarningTags, WarningTimeMotion,
+    WarningTimelineFailure, WarningTimelineRecord, WarningTimelineReport,
+    area_time_polygon_metric_limitations, area_time_polygon_metrics,
+    lead_time_event_metric_limitations, lead_time_event_metrics, lead_time_event_metrics_at_time,
     polygon_timeline, polygon_timeline_at, polygon_timeline_at_time,
     warning_interval_duration_seconds, warning_interval_overlap_seconds,
-    warning_polygon_area_square_degrees, warning_polygon_overlap_area_square_degrees,
+    warning_polygon_area_square_degrees, warning_polygon_contains_point,
+    warning_polygon_overlap_area_square_degrees,
 };
 pub use wmo::{WmoFrameKind, WmoMessage};
 
