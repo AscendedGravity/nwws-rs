@@ -15,6 +15,7 @@ pub mod runtime;
 pub mod stream;
 pub mod ugc;
 pub mod vtec;
+pub mod warning;
 pub mod wmo;
 
 #[cfg(feature = "python")]
@@ -59,6 +60,11 @@ pub use runtime::{
 pub use stream::{FramedChunk, FramedMessageIter, ScanOutcome, WmoStreamScanner};
 pub use ugc::{UgcCode, UgcPurgeTime, UgcString};
 pub use vtec::{EventClass, Hvtec, Phenomenon, Pvtec, Significance, VtecAction};
+pub use warning::{
+    WarningByteRange, WarningLifecycleStatus, WarningPoint, WarningPolygon, WarningTags,
+    WarningTimeMotion, WarningTimelineFailure, WarningTimelineRecord, WarningTimelineReport,
+    polygon_timeline, polygon_timeline_at, polygon_timeline_at_time,
+};
 pub use wmo::{WmoFrameKind, WmoMessage};
 
 /// Start-of-heading control byte used by framed WMO messages.
