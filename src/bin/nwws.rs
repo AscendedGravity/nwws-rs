@@ -498,6 +498,7 @@ fn inspect_command(
                 "inspect",
                 "ok",
                 &report,
+                tool_inputs(path, None),
                 tool_provenance("inspect", path, None),
             )?;
         }
@@ -524,6 +525,7 @@ fn replay_command(
                     "replay",
                     status,
                     &report,
+                    tool_inputs(path, None),
                     tool_provenance("replay", path, None),
                 )?;
             }
@@ -839,6 +841,7 @@ fn archive_import_machine_command(
                 "archive-import",
                 status,
                 &report,
+                tool_inputs(input, Some(archive_dir)),
                 tool_provenance("archive-import", input, Some(archive_dir)),
             )?;
         }
@@ -967,6 +970,7 @@ fn archive_verify_machine_command(
                 "archive-verify",
                 status,
                 &report,
+                tool_inputs(archive_dir, Some(archive_dir)),
                 tool_provenance("archive-verify", archive_dir, Some(archive_dir)),
             )?;
         }
@@ -1367,18 +1371,20 @@ fn print_tool_result<T: Serialize>(
     operation: &str,
     status: &str,
     data: &T,
+    inputs: serde_json::Value,
     provenance: serde_json::Value,
 ) -> Result<(), CliError> {
     let data = serde_json::to_value(data)
         .map_err(|err| CliError::failure(format!("failed to serialize tool result data: {err}")))?;
     let envelope = json!({
-        "schema": "wx.tool_result.v1",
-        "tool": "nwws-rs",
-        "operation": operation,
-        "status": status,
+        "schema_version": "wx.tool_result.v1",
+        "tool_name": tool_name(operation),
+        "ok": status == "ok",
+        "inputs": inputs,
+        "data": data,
         "artifacts": [
             {
-                "id": operation,
+                "artifact_id": operation,
                 "kind": "json",
                 "media_type": "application/json",
                 "description": "Native nwws-rs parser/API output for the requested command"
@@ -1389,10 +1395,26 @@ fn print_tool_result<T: Serialize>(
             "Output reflects parser results for the supplied local input only.",
             "No external NWS source-of-truth or network delivery validation is performed."
         ],
-        "provenance": provenance,
-        "data": data
+        "provenance": provenance
     });
     print_json(&envelope)
+}
+
+fn tool_name(operation: &str) -> &'static str {
+    match operation {
+        "inspect" => "warning.parse_text",
+        "replay" => "warning.replay",
+        "archive-import" => "warning.archive_import",
+        "archive-verify" => "warning.archive_verify",
+        _ => "warning.unknown",
+    }
+}
+
+fn tool_inputs(source_path: &Path, archive_dir: Option<&Path>) -> serde_json::Value {
+    json!({
+        "source_path": source_path.display().to_string(),
+        "archive_dir": archive_dir.map(|path| path.display().to_string())
+    })
 }
 
 fn tool_provenance(
@@ -1413,26 +1435,29 @@ fn tool_evidence(data: &serde_json::Value) -> Vec<serde_json::Value> {
     let mut evidence = Vec::new();
     if let Some(messages) = data.get("messages").and_then(|value| value.as_array()) {
         evidence.push(json!({
-            "kind": "parsed-messages",
+            "evidence_type": "parsed_messages",
+            "summary": format!("Parsed {} warning message(s).", messages.len()),
             "count": messages.len()
         }));
     }
     if let Some(files) = data.get("scanned_files").and_then(|value| value.as_u64()) {
         evidence.push(json!({
-            "kind": "scanned-files",
+            "evidence_type": "scanned_files",
+            "summary": format!("Scanned {files} input file(s)."),
             "count": files
         }));
     }
     if let Some(records) = data.get("records").and_then(|value| value.as_array()) {
         evidence.push(json!({
-            "kind": "records",
+            "evidence_type": "records",
+            "summary": format!("Returned {} archive record(s).", records.len()),
             "count": records.len()
         }));
     }
     if evidence.is_empty() {
         evidence.push(json!({
-            "kind": "parser-output",
-            "value": "nwws-rs API report"
+            "evidence_type": "parser_output",
+            "summary": "Returned a native nwws-rs API report."
         }));
     }
     evidence

@@ -252,13 +252,44 @@ fn archive_verify_tool_result_wraps_machine_report() {
 
     assert!(verify.status.success(), "{:?}", verify);
     let payload: Value = serde_json::from_slice(&verify.stdout).unwrap();
-    assert_eq!(payload["schema"], "wx.tool_result.v1");
-    assert_eq!(payload["operation"], "archive-verify");
-    assert_eq!(payload["status"], "ok");
+    let top_level_keys = payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        top_level_keys,
+        vec![
+            "artifacts",
+            "data",
+            "evidence",
+            "inputs",
+            "limitations",
+            "ok",
+            "provenance",
+            "schema_version",
+            "tool_name",
+        ]
+    );
+    assert_eq!(payload["schema_version"], "wx.tool_result.v1");
+    assert_eq!(payload["tool_name"], "warning.archive_verify");
+    assert_eq!(payload["ok"], true);
+    assert_eq!(
+        payload["inputs"]["archive_dir"].as_str().unwrap(),
+        archive_dir.display().to_string()
+    );
     assert_eq!(payload["data"]["verified_records"], 1);
     assert_eq!(payload["data"]["records"][0]["status"], "ok");
-    assert!(payload["artifacts"].as_array().unwrap().len() >= 1);
-    assert!(payload["evidence"].as_array().unwrap().len() >= 1);
+    assert_eq!(payload["artifacts"][0]["artifact_id"], "archive-verify");
+    assert_eq!(payload["artifacts"][0]["kind"], "json");
+    assert_eq!(payload["evidence"][0]["evidence_type"], "records");
+    assert!(
+        payload["evidence"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("1")
+    );
     assert_eq!(
         payload["provenance"]["archive_dir"].as_str().unwrap(),
         archive_dir.display().to_string()
