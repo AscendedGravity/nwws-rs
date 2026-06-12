@@ -1,75 +1,117 @@
 # nwws-rs
 
-`nwws-rs` is a high-performance NWWS toolkit for:
+[![CI](https://github.com/FahrenheitResearch/nwws-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/FahrenheitResearch/nwws-rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/nwws-rs.svg)](https://crates.io/crates/nwws-rs)
+[![PyPI](https://img.shields.io/pypi/v/nwws-rs.svg)](https://pypi.org/project/nwws-rs/)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
-- parsing raw WMO/NWS text bulletins
-- parsing and validating NWWS-OI XMPP payloads
-- scanning PID201/framed bulletin streams
-- splitting and replaying captured feeds
-- archiving, deduplicating, and verifying bulletin corpora
-- using the same core from Rust, Python, or the CLI
+**A self-hosted NOAA Weather Wire Service (NWWS-OI) platform in one static binary.**
+Connects to the NWS's lowest-latency public text-product feed, parses every
+bulletin strictly (WMO headers, AWIPS/PIL, UGC, VTEC/HVTEC, segments, warning
+tags, polygons, storm motion), dedupes, archives, and serves it all back over a
+local HTTP API with a live Server-Sent Events stream. Rust core, Python
+bindings, CLI.
 
-It is built around one rule: never trust the wrapper more than the bulletin.  
-NWWS-OI metadata is validated against the embedded WMO bulletin instead of being accepted at face value.
+```bash
+# the entire setup, start to finish:
+docker run -e NWWS_USERNAME=you -e NWWS_PASSWORD=secret \
+  -v nwws-archive:/archive -p 8080:8080 ghcr.io/fahrenheitresearch/nwws-rs
 
-## What This Repo Is
-
-This repo is the ingest and parsing core for NWWS text traffic.
-
-It includes:
-
-- a Rust library
-- a Python package
-- a CLI
-- a blocking NWWS-OI client
-- PID201 framed-stream tooling
-- archive import and verification workflows
-
-It is designed for developers building:
-
-- alerting systems
-- ingest pipelines
-- archives and replay tools
-- verification harnesses
-- weather applications that need faithful NWS text-product parsing
-
-## Beginner Quick Start
-
-If you just want to see it work, do one of these first.
-
-### Option 1: Python
-
-```powershell
-cd C:\Users\drew\nwws-rs
-python -m pip install -e .
-python examples/python_demo.py
+curl 'http://127.0.0.1:8080/v1/stream?pil=TOR'     # tornado warnings, live, as SSE
+curl 'http://127.0.0.1:8080/v1/warnings/active'    # everything in effect right now
 ```
 
-Minimal example:
+NWWS-OI delivers warnings seconds after the WFO hits send — typically well
+ahead of the public CAP/REST mirrors. Credentials are free:
+[request them from the NWS here](https://www.weather.gov/nwws/nwws_oi_request).
+
+## Why this exists
+
+Running your own NWWS-OI consumer has traditionally meant gluing together an
+XMPP library, a parser (usually [pyIEM](https://github.com/akrherz/pyIEM)),
+hand-rolled reconnect logic, deduplication, and storage. nwws-rs ships that
+whole stack as one tool, and the parsing core is fast enough to chew through
+years of archives:
+
+| | products/sec (full parse) | relative |
+|---|---:|---:|
+| **nwws-rs** (via Python bindings) | **31,265** | **19.0x** |
+| pyIEM 1.x (pure Python) | 1,642 | 1x |
+
+Same bulletins, same machine, full parse path on both sides (headers, UGC,
+VTEC, segments, geometry). The nwws-rs number *includes* the Python boundary
+overhead; the pure-Rust path is faster still. Reproduce it:
+`python tools/bench_pyiem_speed.py` (methodology in the script header).
+
+Honest scope: nwws-rs covers NWWS **text products**. pyIEM also parses METAR,
+SHEF, and other formats and is the right tool for those. For NWWS-OI ingest,
+warning parsing, alerting, and archive work, nwws-rs is designed to be the
+last tool you need.
+
+## Quick start
+
+### 1. Self-hosted API server (the headline feature)
+
+Grab a binary from [Releases](https://github.com/FahrenheitResearch/nwws-rs/releases)
+(Linux, macOS, Windows) or build with `cargo install nwws-rs --features serve`,
+then:
+
+```bash
+export NWWS_USERNAME=you NWWS_PASSWORD=secret
+nwws serve ./archive --bind 127.0.0.1:8080
+```
+
+That one process connects to NWWS-OI, auto-reconnects forever with jittered
+backoff and MUC history backfill, validates and dedupes every product, archives
+them under date-partitioned directories, and serves:
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /v1/stream` | live products as Server-Sent Events; filter with `?office=KLOT`, `?pil=TOR`, `?family=tornado` |
+| `GET /v1/products/recent` | newest archived products (`limit`, `days`, `office`, `pil`, `family`) |
+| `GET /v1/products/{fingerprint}` | metadata + full raw text of one product |
+| `GET /v1/warnings/active` | VTEC warnings in effect at `?at=` (default now), collapsed per event |
+| `GET /v1/timeline` | warning lifecycle records: issued/canceled/expired, polygons, motion, tags |
+| `GET /healthz` | ingest connection state and counters |
+
+CORS is permissive, so a browser dashboard can consume the API directly.
+`--no-ingest` serves an existing archive with **zero credentials** — useful for
+replaying captured data or fronting a shared archive.
+
+A tornado-warning webhook is a shell one-liner:
+
+```bash
+curl -N 'http://127.0.0.1:8080/v1/stream?pil=TOR' | while read -r line; do
+  case "$line" in data:*) echo "${line#data: }" | your-notifier ;; esac
+done
+```
+
+### 2. Python
+
+```bash
+pip install nwws-rs
+```
 
 ```python
-from pathlib import Path
 import nwws_rs
 
-message = nwws_rs.parse_bulletin(
-    Path("tests/fixtures/wmo_tornado_warning.txt").read_bytes()
-)
+# Parse any NWS text product
+msg = nwws_rs.parse_bulletin(open("tor.txt", "rb").read())
+print(msg.heading, msg.awips_id, msg.family)
+print(msg.segments[0].tornado_tag)
 
-print(message.heading)
-print(message.awips_id)
-print(message.family)
-print(message.segments[0].tornado_tag)
+# Or consume NWWS-OI live, no server needed
+client = nwws_rs.OiClient.connect("user", "password")
+while True:
+    message = client.next_message()
+    print(message.wrapper.id, message.heading)
 ```
 
-### Option 2: CLI
+Full surface: `parse`, `parse_bulletin`, `parse_oi`, `inspect_*`, `scan_path`,
+`active_warnings_at`, `split_pid201_*`, `archive_import`, `archive_verify`,
+`Pid201Stream`, `OiClient`. Typed, object-oriented, returns structured objects.
 
-```powershell
-cd C:\Users\drew\nwws-rs
-cargo run --bin nwws -- inspect tests/fixtures/wmo_tornado_warning.txt
-cargo run --bin nwws -- inspect tests/fixtures/nwws_oi_tornado_warning.xml
-```
-
-### Option 3: Rust
+### 3. Rust
 
 ```rust
 use nwws_rs::NwwsContent;
@@ -83,259 +125,128 @@ assert_eq!(content.bulletin.awips_id.unwrap().raw(), "TORLOT");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Common Tasks
+The supervised ingest loop is a library API too ([`daemon`](src/daemon.rs)):
 
-### Parse one bulletin
+```rust,no_run
+use std::sync::atomic::AtomicBool;
+use nwws_rs::{
+    ArchiveStore, DaemonOptions, DedupeStore, IngestService, MessageRouter, OiClientConfig,
+    run_oi_daemon,
+};
 
-Python:
-
-```python
-import nwws_rs
-
-report = nwws_rs.parse_bulletin(open("tests/fixtures/wmo_tornado_warning.txt", "rb").read())
-print(report.semantic_fingerprint)
+let config = OiClientConfig::new("user", "password");
+let router = MessageRouter::new(Some(ArchiveStore::new("archive")));
+let dedupe = DedupeStore::open("archive/state/dedupe.txt")?;
+let mut service = IngestService::new(router, dedupe);
+let shutdown = AtomicBool::new(false);
+run_oi_daemon(&config, &mut service, &DaemonOptions::default(), |_event| {}, &shutdown);
+# Ok::<(), std::io::Error>(())
 ```
 
-CLI:
+### 4. Headless ingest (no HTTP)
+
+```bash
+nwws oi daemon ./archive            # credentials from NWWS_USERNAME/NWWS_PASSWORD
+```
+
+Same supervision as `serve` (reconnect, backfill, dedupe), just without the API.
+A hardened systemd unit and env template live in [`deploy/`](deploy/).
+
+## How it compares
+
+| | nwws-rs | pyIEM + slixmpp | api.weather.gov |
+|---|---|---|---|
+| Latency | seconds (NWWS-OI direct) | seconds (NWWS-OI direct) | tens of seconds to minutes |
+| Setup | one binary / `docker run` | assemble client, parser, reconnect, storage yourself | none (hosted) |
+| Self-hosted / offline archive | yes | DIY | no |
+| Live push | SSE out of the box | DIY | no (poll) |
+| Bulk reparse throughput | ~31k products/sec | ~1.6k products/sec | n/a |
+| Non-NWWS formats (METAR, SHEF...) | no | yes | partial |
+| Credentials needed | free NWS signup | free NWS signup | none |
+
+## CLI reference
+
+The `nwws` binary also covers inspection, replay, and research workflows over
+files, directories, and archives:
+
+```text
+nwws inspect <file>                              parse + validate one input (WMO, NWWS-OI XML, PID201)
+nwws replay <dir>                                stream a captured corpus through the parser
+nwws summary <dir>                               source/transport/family counts
+nwws active-at <path> --at <rfc3339>             VTEC warnings active at a moment
+nwws timeline <path> [--at <rfc3339>]            warning lifecycle records (issued/canceled/expired, polygons)
+nwws lead-time <path> --event-at <t> --lat --lon point-event warning lead-time metrics
+nwws oi connect <user> <pass> [--count n]        print live NWWS-OI messages
+nwws oi archive <user> <pass> <dir> [--duration] bounded live capture into an archive
+nwws oi daemon <dir>                             supervised always-on ingest (auto-reconnect + backfill)
+nwws serve <dir> [--bind addr] [--no-ingest]     ingest daemon + HTTP API        (build feature: serve)
+nwws pid201 inspect|split|archive ...            PID201 framed-stream (NOAAPORT/EMWIN-style) tooling
+nwws archive import|verify|active-at|timeline    canonical archive workflows
+```
+
+Most commands accept `--format json|jsonl|tool-result` for machine-readable
+output. `tool-result` wraps reports in a `wx.tool_result.v1` envelope with
+`artifacts`, `evidence`, `limitations`, and `provenance` — built for AI-agent
+consumers.
+
+## Design notes
+
+### Parsing model
+
+NWWS is treated as multiple transport surfaces over one bulletin semantics:
+raw WMO text, NWWS-OI XMPP stanzas, and PID201 framed streams. The rule
+throughout: **never trust the wrapper more than the bulletin.** NWWS-OI
+metadata is validated against the embedded WMO bulletin instead of being
+accepted at face value.
+
+### Library layers
+
+- [`src/wmo.rs`](src/wmo.rs) — WMO bulletin framing and headers
+- [`src/oi.rs`](src/oi.rs) — NWWS-OI messages, wrapper-vs-bulletin validation
+- [`src/product.rs`](src/product.rs) — product families, segments, warning tags
+- [`src/ugc.rs`](src/ugc.rs) / [`src/vtec.rs`](src/vtec.rs) — UGC expansion, P-VTEC/H-VTEC
+- [`src/geo.rs`](src/geo.rs) — `LAT...LON` polygons, `TIME...MOT...LOC` motion
+- [`src/pid201.rs`](src/pid201.rs) — incremental framed-stream ingest
+- [`src/runtime.rs`](src/runtime.rs) — dedupe, archive store, routing
+- [`src/oi_client.rs`](src/oi_client.rs) — blocking NWWS-OI XMPP client (rustls, no OpenSSL)
+- [`src/daemon.rs`](src/daemon.rs) — supervised ingest: jittered exponential backoff
+  (equal-jitter; Brooker 2015, AWS Architecture Blog), XMPP whitespace keepalives
+  (RFC 6120 §4.6), MUC history backfill on reconnect
+- [`src/serve.rs`](src/serve.rs) — axum HTTP API + SSE (feature `serve`)
+- [`src/warning.rs`](src/warning.rs) — warning timelines, lead-time and
+  area-time-polygon verification metrics
+- [`src/api.rs`](src/api.rs) — inspect/scan/split/archive surface
+- [`src/python.rs`](src/python.rs) — PyO3 bindings (abi3, one wheel per platform)
+
+### Archive layout
+
+`oi daemon` / `oi archive` / `serve` write
+`archive/yyyy/mm/dd/<source>/<office>/<pil>/<family>/<fingerprint>.{xml,json}` —
+raw stanza plus metadata sidecar, deduplicated by normalized bulletin content
+(BLAKE3). Date partitioning keeps HTTP query cost bounded by the lookback
+window (`?days=`), not by total archive size. The dedupe index survives
+restarts, so reconnect backfill never double-archives.
+
+### Verification
+
+- 140+ unit/integration/property/CLI/HTTP tests, including SSE end-to-end
+- differential comparison against pyIEM on overlapping raw-bulletin semantics
+  (`tools/compare_pyiem.py`, `tools/compare_pyiem_corpus.py`)
+- Python API tests against the built wheel
+- CI: 3-OS test matrix, clippy `-D warnings`, MSRV check, Docker smoke test
 
 ```powershell
-cargo run --bin nwws -- inspect tests/fixtures/wmo_tornado_warning.txt
+.\tools\verify.ps1            # fmt + clippy + tests + python suite
+.\tools\verify.ps1 -Corpus    # plus the pyIEM corpus comparison
 ```
 
-### Parse one NWWS-OI message
+### Accuracy scope
 
-Python:
+Strict and heavily verified, but bounded to what is implemented and tested:
+WMO/NWWS-OI/PID201 parsing, AWIPS/UGC/VTEC/HVTEC/segments/tags/geometry,
+archive ingest and verification. It is not a NOAAPORT demodulator, not a
+satellite receiver, and not proof against every malformed message ever emitted.
 
-```python
-import nwws_rs
+## License
 
-xml = open("tests/fixtures/nwws_oi_tornado_warning.xml", "r", encoding="utf-8").read()
-message = nwws_rs.parse_oi(xml)
-print(message.wrapper.id)
-print(message.heading)
-```
-
-CLI:
-
-```powershell
-cargo run --bin nwws -- inspect tests/fixtures/nwws_oi_tornado_warning.xml
-```
-
-### Split a PID201 capture into bulletin files
-
-Python:
-
-```python
-import nwws_rs
-
-report = nwws_rs.write_pid201_split("capture.pid201", "out/split")
-print(len(report.written))
-```
-
-CLI:
-
-```powershell
-cargo run --bin nwws -- pid201 split capture.pid201 out\split
-```
-
-### Import an archive and verify it later
-
-Python:
-
-```python
-import nwws_rs
-
-import_report = nwws_rs.archive_import("captures", "archive")
-verify_report = nwws_rs.archive_verify("archive")
-active_report = nwws_rs.active_warnings_at("archive", "2026-04-21T16:25:00Z")
-print(import_report.archived_records, verify_report.verified_records, active_report.active_records)
-```
-
-CLI:
-
-```powershell
-cargo run --bin nwws -- archive import captures archive
-cargo run --bin nwws -- archive verify archive
-cargo run --bin nwws -- archive active-at archive --at 2026-04-21T16:25:00Z --format tool-result
-```
-
-## Python API
-
-Install from the repo:
-
-```powershell
-python -m pip install -e .
-```
-
-Main entry points:
-
-- `parse`
-- `parse_path`
-- `parse_bulletin`
-- `parse_oi`
-- `inspect_bytes`
-- `inspect_text`
-- `inspect_path`
-- `scan_path`
-- `collect_input_paths`
-- `active_warnings_at`
-- `split_pid201_bytes`
-- `split_pid201_file`
-- `write_pid201_split`
-- `archive_import`
-- `archive_verify`
-- `Pid201Stream`
-- `OiClient`
-- `OpenInterfaceClient`
-
-The Python surface is typed and object-oriented. It returns structured objects instead of raw dicts, so you can inspect headings, families, segments, tags, geometry, and fingerprints directly.
-
-Runnable demo:
-
-```powershell
-python examples/python_demo.py
-```
-
-## CLI
-
-The `nwws` binary is the fastest way to inspect real captures without writing code.
-
-```powershell
-cargo run --bin nwws -- inspect <file>
-cargo run --bin nwws -- replay <directory>
-cargo run --bin nwws -- active-at <file-or-directory-or-archive> --at <utc-rfc3339>
-cargo run --bin nwws -- timeline <file-or-directory-or-archive> --at <utc-rfc3339> --format tool-result
-cargo run --bin nwws -- lead-time <file-or-directory-or-archive> --event-at <utc-rfc3339> --lat 42.05 --lon -88.20 --format tool-result
-cargo run --bin nwws -- summary <file-or-directory>
-cargo run --bin nwws -- oi connect <username> <password> --count 5
-cargo run --bin nwws -- pid201 inspect <capture-file>
-cargo run --bin nwws -- pid201 split <capture-file> <output-dir>
-cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir>
-cargo run --bin nwws -- archive import <input-path> <archive-dir>
-cargo run --bin nwws -- archive verify <archive-dir>
-cargo run --bin nwws -- archive active-at <archive-dir> --at <utc-rfc3339>
-cargo run --bin nwws -- archive timeline <archive-dir> --at <utc-rfc3339> --format json
-cargo run --bin nwws -- archive lead-time <archive-dir> --event-at <utc-rfc3339> --lat 42.05 --lon -88.20 --format tool-result
-```
-
-Inspection, replay, active-at, timeline, lead-time, PID201 inspect/archive, and archive import/verify support machine-readable output with `--format json`, `--format jsonl`, or `--format tool-result`. JSON output uses the same API inspection/archive structures exposed to Python, including WMO heading parts, office, AWIPS/PIL, product family, UGC, VTEC, LAT/LON, TIME/MOT/LOC, semantic fingerprints, raw bulletin BLAKE3 hashes, and archive IDs. `active-at` returns warning P-VTEC records active at the supplied RFC3339 UTC reference, collapsed by office, VTEC event, UGC list, and event family. `timeline` returns warning lifecycle records, including issued/valid/canceled/expired times, tags, polygons, motion lines, and lifecycle status at an optional reference time. `lead-time` computes point-event warning lead time, missed-event, point-warning interval, and false-alarm-hook metrics from timeline records. `--format tool-result` wraps the report in a `wx.tool_result.v1` envelope with `artifacts`, `evidence`, `limitations`, and `provenance`.
-
-`archive import` writes canonical bulletin records under `archive/records/` and appends a `records.tsv` manifest. Re-importing the same bulletin from raw WMO, NWWS-OI XML, or PID201 captures deduplicates by normalized bulletin content.
-
-## Advanced Overview
-
-### Parsing Model
-
-The repo treats NWWS as multiple transport surfaces over the same underlying bulletin semantics:
-
-- raw WMO bulletin text
-- NWWS-OI wrapped XMPP stanzas
-- PID201 framed bulletin streams
-
-That means correctness depends on:
-
-- strict heading parsing
-- strict AWIPS ID parsing
-- UGC parsing and expansion
-- VTEC and HVTEC parsing
-- segmented product parsing
-- warning-tag extraction
-- geometry extraction from `LAT...LON` and `TIME...MOT...LOC`
-- wrapper-to-bulletin consistency checks
-
-### Library Layers
-
-Core modules:
-
-- [`src/wmo.rs`](</C:/Users/drew/nwws-rs/src/wmo.rs>) parses WMO bulletin framing and headers
-- [`src/oi.rs`](</C:/Users/drew/nwws-rs/src/oi.rs>) parses NWWS-OI messages and validates embedded bulletins
-- [`src/product.rs`](</C:/Users/drew/nwws-rs/src/product.rs>) parses product families, segments, tags, and structure
-- [`src/ugc.rs`](</C:/Users/drew/nwws-rs/src/ugc.rs>) parses and expands UGC strings
-- [`src/vtec.rs`](</C:/Users/drew/nwws-rs/src/vtec.rs>) parses P-VTEC and H-VTEC
-- [`src/geo.rs`](</C:/Users/drew/nwws-rs/src/geo.rs>) parses geometry and motion lines
-- [`src/pid201.rs`](</C:/Users/drew/nwws-rs/src/pid201.rs>) handles incremental framed-stream ingest
-- [`src/runtime.rs`](</C:/Users/drew/nwws-rs/src/runtime.rs>) handles dedupe, archive, and ingest service workflows
-- [`src/oi_client.rs`](</C:/Users/drew/nwws-rs/src/oi_client.rs>) implements the blocking NWWS-OI client
-- [`src/api.rs`](</C:/Users/drew/nwws-rs/src/api.rs>) exposes higher-level inspect, scan, split, and archive APIs
-- [`src/python.rs`](</C:/Users/drew/nwws-rs/src/python.rs>) exposes the native Python bridge
-
-### Verification Strategy
-
-Verification is not hand-wavy. The repo currently checks:
-
-- unit tests for headers, WMO framing, NWWS-OI parsing, UGC, VTEC, geometry, PID201, runtime, and API workflows
-- integration tests for real warning-style fixtures and wrapper mismatch failures
-- property tests over generated bulletin shapes and scanner behavior
-- CLI tests for split/import/verify workflows
-- Python API tests for parse, stream, archive, and demo-level usage
-- differential comparison against `pyIEM` on overlapping raw-bulletin semantics
-- curated corpus comparison against `pyIEM`
-- bench compilation for parser throughput tracking
-
-Current primary verification commands:
-
-```powershell
-cargo fmt --check
-cargo clippy --all-targets --features python -- -D warnings
-cargo test --all-targets --features python
-cargo test --release --all-targets --features python
-python tools/compare_pyiem.py
-python tools/compare_pyiem_corpus.py --max-failures 5
-python -m unittest discover -s python-tests -p "test_*.py"
-cargo bench --bench parse --no-run --features python
-```
-
-Or use the combined helper:
-
-```powershell
-.\tools\verify.ps1
-.\tools\verify.ps1 -Corpus -SkipBench
-```
-
-### Performance Notes
-
-This repo is optimized around:
-
-- byte scanning instead of regex-heavy framed-stream parsing
-- strict parsing with low allocation pressure
-- direct structured extraction instead of post-hoc text scraping
-
-Criterion benches are in [benches/parse.rs](</C:/Users/drew/nwws-rs/benches/parse.rs>).
-
-### Repo Layout
-
-- [`examples`](</C:/Users/drew/nwws-rs/examples>) has runnable Rust and Python demos
-- [`tests/fixtures`](</C:/Users/drew/nwws-rs/tests/fixtures>) has bulletin and NWWS-OI fixtures
-- [`python-tests`](</C:/Users/drew/nwws-rs/python-tests>) has Python API tests
-- [`tools`](</C:/Users/drew/nwws-rs/tools>) has verification and `pyIEM` comparison tooling
-- [`fuzz/corpus`](</C:/Users/drew/nwws-rs/fuzz/corpus>) has seed inputs for future fuzz work
-
-## Accuracy Scope
-
-This repo is intentionally strict and heavily verified, but the claim is still bounded to what is implemented and tested.
-
-It does cover:
-
-- WMO bulletin parsing
-- NWWS-OI parsing and wrapper validation
-- AWIPS, UGC, VTEC, HVTEC, segment, tag, and geometry parsing
-- PID201 framed-stream workflows
-- archive ingest and verification
-- Python, Rust, and CLI access to the same core logic
-
-It does not pretend to be:
-
-- a hardware satellite receiver
-- a full NOAAPORT demodulator stack
-- proof against every historical malformed message ever emitted
-
-## Why This Exists
-
-Most public weather tooling either:
-
-- stops at feed consumption
-- focuses on CAP/API layers instead of raw text products
-- parses only part of the bulletin
-- or is difficult to reuse from modern Rust or Python code
-
-`nwws-rs` is meant to be the reusable NWWS parsing and ingest core that can sit under bigger systems.
+MIT or Apache-2.0, at your option.
