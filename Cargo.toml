@@ -24,7 +24,9 @@ axum = { version = "0.8", optional = true }
 base64 = "0.22"
 blake3 = "1.8"
 memchr = "2.7"
-pyo3 = { version = "0.28.3", optional = true, features = ["abi3-py38", "extension-module"] }
+# extension-module is enabled by maturin at wheel-build time (pyproject.toml);
+# keeping it out of this feature lets `cargo test --features python` link libpython.
+pyo3 = { version = "0.28.3", optional = true, features = ["abi3-py38"] }
 quick-xml = "0.38"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0", features = ["derive"] }

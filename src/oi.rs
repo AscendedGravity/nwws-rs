@@ -204,10 +204,8 @@ fn parse_message(input: &str) -> Result<NwwsOiMessage> {
                         TextTarget::Summary
                     });
                 }
-                b"x" => {
-                    if find_attr(&element, b"xmlns")?.as_deref() == Some("nwws-oi") {
-                        payload_builder = Some(PayloadBuilder::from_start(&element)?);
-                    }
+                b"x" if find_attr(&element, b"xmlns")?.as_deref() == Some("nwws-oi") => {
+                    payload_builder = Some(PayloadBuilder::from_start(&element)?);
                 }
                 _ => {}
             },

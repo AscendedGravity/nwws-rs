@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [tool.maturin]
-features = ["python"]
+features = ["python", "pyo3/extension-module"]
 python-source = "python"
 module-name = "nwws_rs._native"
 

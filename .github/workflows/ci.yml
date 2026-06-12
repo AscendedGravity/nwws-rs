@@ -57,7 +57,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install maturin
-      - run: maturin build --release --out dist --features python
+      - run: maturin build --release --out dist
       - run: pip install dist/*.whl
       - run: python -m unittest discover -s python-tests -p "test_*.py"
 

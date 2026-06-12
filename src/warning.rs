@@ -1145,7 +1145,7 @@ fn area_time(area: Option<f64>, duration_seconds: Option<i64>) -> Option<f64> {
 
 fn ratio_i64(numerator: Option<i64>, denominator: Option<i64>) -> Option<f64> {
     numerator
-        .and_then(|numerator| denominator.map(|denominator| (numerator, denominator)))
+        .zip(denominator)
         .and_then(|(numerator, denominator)| {
             (denominator > 0).then_some((numerator as f64 / denominator as f64).clamp(0.0, 1.0))
         })
@@ -1153,7 +1153,7 @@ fn ratio_i64(numerator: Option<i64>, denominator: Option<i64>) -> Option<f64> {
 
 fn ratio_f64(numerator: Option<f64>, denominator: Option<f64>) -> Option<f64> {
     numerator
-        .and_then(|numerator| denominator.map(|denominator| (numerator, denominator)))
+        .zip(denominator)
         .and_then(|(numerator, denominator)| {
             (denominator > PLANAR_EPSILON).then_some((numerator / denominator).clamp(0.0, 1.0))
         })

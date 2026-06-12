@@ -11,7 +11,7 @@ honest number for Python users. Each parser gets a warmup pass, then
 
 Usage
 -----
-    maturin develop --release --features python
+    maturin develop --release
     python tools/bench_pyiem_speed.py [--iterations 2000] [--rounds 5]
 
 pyIEM is loaded from a source tree (clone of https://github.com/akrherz/pyIEM);
