@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nwws_rs::{
-    ArchiveStore as RuntimeArchiveStore, DedupeStore, FramedStreamIngest, IngestHint,
-    IngestService, MessageRouter, NwwsContent, NwwsOiClient, NwwsOiMessage, OiClientConfig,
-    ParsedInput, ProductFamily, TransportDescriptor, TransportKind, WarningPoint,
-    collect_input_paths, infer_hint_from_path, lead_time_event_metrics, parse_with_hint,
-    polygon_timeline, polygon_timeline_at,
+    ArchiveStore as RuntimeArchiveStore, DaemonEvent, DaemonOptions, DedupeStore,
+    FramedStreamIngest, IngestHint, IngestService, MessageRouter, NwwsContent, NwwsOiClient,
+    NwwsOiMessage, OiClientConfig, ParsedInput, ProductFamily, TransportDescriptor, TransportKind,
+    WarningPoint, collect_input_paths, infer_hint_from_path, lead_time_event_metrics,
+    parse_with_hint, polygon_timeline, polygon_timeline_at, run_oi_daemon,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -193,6 +193,11 @@ fn oi_command(args: &mut impl Iterator<Item = OsString>) -> Result<(), CliError>
                 options,
             )
         }
+        "daemon" => {
+            let archive = take_path_arg("oi daemon", args)?;
+            let options = parse_oi_daemon_options(args)?;
+            oi_daemon_command(&archive, options)
+        }
         other => Err(CliError::usage(format!(
             "unknown oi subcommand {other}\n\n{}",
             usage()
@@ -210,6 +215,7 @@ fn usage() -> &'static str {
   cargo run --bin nwws -- summary <file-or-directory> [--hint <auto|oi|pid201|bulletin|stream>]
   cargo run --bin nwws -- oi connect <username> <password> [--count <n>] [--history <n>]
   cargo run --bin nwws -- oi archive <username> <password> <archive-dir> [--count <n>] [--duration <seconds>] [--history <n>] [--format <text|json|jsonl|tool-result>]
+  cargo run --bin nwws -- oi daemon <archive-dir> [--username <u>] [--password <p>] [--history <n>] [--reconnect-history <n>] [--archive-duplicates] [--quiet]
   cargo run --bin nwws -- pid201 inspect <capture-file> [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- pid201 split <capture-file> <output-dir>
   cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir> [--format <text|json|jsonl|tool-result>]
@@ -228,6 +234,8 @@ commands:
   summary          aggregate detected source, transport, and family counts
   oi connect       open a blocking NWWS-OI XMPP session and print parsed messages
   oi archive       open a bounded NWWS-OI XMPP session and ingest messages into ArchiveStore
+  oi daemon        run supervised always-on ingest with auto-reconnect and history backfill
+                   (credentials via --username/--password or NWWS_USERNAME/NWWS_PASSWORD)
   pid201 inspect   force a file through the PID201 framed-stream path
   pid201 split     split a PID201 capture into canonical bulletin files
   pid201 archive   archive a PID201 capture into a deduplicated record store
@@ -721,6 +729,57 @@ fn parse_oi_archive_options(
             other => {
                 return Err(CliError::usage(format!(
                     "unexpected extra argument for oi archive: {other}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_oi_daemon_options(
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<OiDaemonOptions, CliError> {
+    let mut options = OiDaemonOptions::default();
+
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--username" | "--user" => {
+                options.username = Some(parse_string_arg("oi daemon", "--username", args)?)
+            }
+            "--password" | "--pass" => {
+                options.password = Some(parse_string_arg("oi daemon", "--password", args)?)
+            }
+            "--history" => {
+                options.history = parse_u32_arg("oi daemon", "--history", args)?;
+            }
+            "--reconnect-history" => {
+                options.reconnect_history =
+                    parse_u32_arg("oi daemon", "--reconnect-history", args)?;
+            }
+            "--max-messages" => {
+                options.max_messages =
+                    Some(parse_positive_usize_arg("oi daemon", "--max-messages", args)? as u64);
+            }
+            "--archive-duplicates" => options.archive_duplicates = true,
+            "--quiet" => options.quiet = true,
+            "--host" => options.host = Some(parse_string_arg("oi daemon", "--host", args)?),
+            "--domain" => options.domain = Some(parse_string_arg("oi daemon", "--domain", args)?),
+            "--port" => options.port = Some(parse_u16_arg("oi daemon", "--port", args)?),
+            "--room" => options.room = Some(parse_string_arg("oi daemon", "--room", args)?),
+            "--room-service" => {
+                options.room_service = Some(parse_string_arg("oi daemon", "--room-service", args)?)
+            }
+            "--nickname" => {
+                options.nickname = Some(parse_string_arg("oi daemon", "--nickname", args)?)
+            }
+            "--resource" => {
+                options.resource = Some(parse_string_arg("oi daemon", "--resource", args)?)
+            }
+            other => {
+                return Err(CliError::usage(format!(
+                    "unexpected extra argument for oi daemon: {other}\n\n{}",
                     usage()
                 )));
             }
@@ -1417,7 +1476,9 @@ fn archive_live_oi_message(
         .issue
         .format(&Rfc3339)
         .map_err(|err| CliError::failure(format!("failed to format NWWS-OI issue time: {err}")))?;
-    let archive_xml = oi_message_to_archive_xml(message)?;
+    let archive_xml = message
+        .to_archive_xml()
+        .map_err(|err| CliError::failure(format!("failed to serialize NWWS-OI message: {err}")))?;
     let process_report = service
         .process_bytes(IngestHint::OpenInterface, archive_xml.as_bytes())
         .map_err(|err| CliError::failure(format!("runtime ingest failed: {err}")))?;
@@ -1466,91 +1527,172 @@ fn oi_archive_message_report(
     }
 }
 
-fn oi_message_to_archive_xml(message: &NwwsOiMessage) -> Result<String, CliError> {
-    let payload = message
-        .payload
-        .as_ref()
-        .ok_or_else(|| CliError::failure("NWWS-OI message did not contain a payload"))?;
-    let issue = payload
-        .issue
-        .format(&Rfc3339)
-        .map_err(|err| CliError::failure(format!("failed to format NWWS-OI issue time: {err}")))?;
-    let mut xml = String::new();
+fn oi_daemon_command(archive_dir: &Path, options: OiDaemonOptions) -> Result<(), CliError> {
+    let (username, password) = resolve_oi_credentials(options.username, options.password)?;
 
-    xml.push_str("<message");
-    push_xml_attr(
-        &mut xml,
-        "type",
-        message.stanza_type.as_deref().unwrap_or("groupchat"),
+    fs::create_dir_all(archive_dir).map_err(|err| {
+        CliError::failure(format!(
+            "failed to create archive directory {}: {err}",
+            archive_dir.display()
+        ))
+    })?;
+
+    let mut config = OiClientConfig::new(username, password);
+    if let Some(host) = options.host {
+        config.host = host;
+    }
+    if let Some(domain) = options.domain {
+        config.domain = domain;
+    }
+    if let Some(port) = options.port {
+        config.port = port;
+    }
+    if let Some(room) = options.room {
+        config.room = room;
+    }
+    if let Some(room_service) = options.room_service {
+        config.room_service = room_service;
+    }
+    if let Some(nickname) = options.nickname {
+        config.nickname = nickname;
+    }
+    if let Some(resource) = options.resource {
+        config.resource = resource;
+    }
+
+    let router = MessageRouter::new(Some(RuntimeArchiveStore::new(archive_dir)));
+    let dedupe =
+        DedupeStore::open(archive_dir.join("state").join("dedupe.txt")).map_err(|err| {
+            CliError::failure(format!(
+                "failed to open archive dedupe store in {}: {err}",
+                archive_dir.display()
+            ))
+        })?;
+    let mut service = IngestService::new(router, dedupe);
+    service.set_archive_duplicates(options.archive_duplicates);
+
+    let daemon_options = DaemonOptions {
+        initial_history: options.history,
+        reconnect_history: options.reconnect_history,
+        max_messages: options.max_messages,
+        ..DaemonOptions::default()
+    };
+
+    log_daemon_line(&format!(
+        "starting NWWS-OI daemon: room={} archive={} history={} reconnect-history={}",
+        config.room_address(),
+        archive_dir.display(),
+        daemon_options.initial_history,
+        daemon_options.reconnect_history,
+    ));
+
+    let shutdown = std::sync::atomic::AtomicBool::new(false);
+    let quiet = options.quiet;
+    let summary = run_oi_daemon(
+        &config,
+        &mut service,
+        &daemon_options,
+        |event| log_daemon_event(&event, quiet),
+        &shutdown,
     );
-    if let Some(from) = message.from.as_deref() {
-        push_xml_attr(&mut xml, "from", from);
-    }
-    if let Some(to) = message.to.as_deref() {
-        push_xml_attr(&mut xml, "to", to);
-    }
-    xml.push('>');
 
-    if let Some(summary) = message.summary.as_deref() {
-        xml.push_str("<body>");
-        xml.push_str(&escape_xml_text(summary));
-        xml.push_str("</body>");
-    }
-    if let Some(summary) = message.xhtml_summary.as_deref() {
-        xml.push_str("<html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'>");
-        xml.push_str(&escape_xml_text(summary));
-        xml.push_str("</body></html>");
-    }
-
-    xml.push_str("<x xmlns='nwws-oi'");
-    push_xml_attr(&mut xml, "cccc", &payload.cccc);
-    push_xml_attr(&mut xml, "ttaaii", &payload.ttaaii);
-    push_xml_attr(&mut xml, "issue", &issue);
-    push_xml_attr(&mut xml, "awipsid", &payload.awips_id);
-    push_xml_attr(
-        &mut xml,
-        "id",
-        &format!("{}.{}", payload.id.process_id, payload.id.sequence),
-    );
-    xml.push('>');
-    xml.push_str(&escape_xml_text(&payload.raw_bulletin));
-    xml.push_str("</x></message>");
-
-    Ok(xml)
+    log_daemon_line(&format!(
+        "daemon stopped: connections={} reconnects={} read={} archived={} duplicates={} failures={}",
+        summary.connections,
+        summary.reconnects,
+        summary.messages_read,
+        summary.archived_records,
+        summary.duplicate_records,
+        summary.connect_failures + summary.ingest_failures,
+    ));
+    Ok(())
 }
 
-fn push_xml_attr(xml: &mut String, key: &str, value: &str) {
-    xml.push(' ');
-    xml.push_str(key);
-    xml.push_str("='");
-    xml.push_str(&escape_xml_attr(value));
-    xml.push('\'');
+fn resolve_oi_credentials(
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<(String, String), CliError> {
+    let username = username
+        .or_else(|| env::var("NWWS_USERNAME").ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CliError::usage(
+                "missing NWWS-OI username: pass --username or set NWWS_USERNAME".to_owned(),
+            )
+        })?;
+    let password = password
+        .or_else(|| env::var("NWWS_PASSWORD").ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CliError::usage(
+                "missing NWWS-OI password: pass --password or set NWWS_PASSWORD".to_owned(),
+            )
+        })?;
+    Ok((username, password))
 }
 
-fn escape_xml_attr(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| match ch {
-            '&' => "&amp;".chars().collect::<Vec<_>>(),
-            '<' => "&lt;".chars().collect(),
-            '>' => "&gt;".chars().collect(),
-            '"' => "&quot;".chars().collect(),
-            '\'' => "&apos;".chars().collect(),
-            _ => vec![ch],
-        })
-        .collect()
+fn log_daemon_line(message: &str) {
+    let timestamp = format_utc_now().unwrap_or_else(|_| "-".to_owned());
+    println!("[{timestamp}] {message}");
 }
 
-fn escape_xml_text(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| match ch {
-            '&' => "&amp;".chars().collect::<Vec<_>>(),
-            '<' => "&lt;".chars().collect(),
-            '>' => "&gt;".chars().collect(),
-            _ => vec![ch],
-        })
-        .collect()
+fn log_daemon_event(event: &DaemonEvent<'_>, quiet: bool) {
+    match event {
+        DaemonEvent::Connected { jid, attempt } => log_daemon_line(&format!(
+            "connected jid={} attempt={attempt}",
+            jid.unwrap_or("-")
+        )),
+        DaemonEvent::ConnectFailed {
+            error,
+            attempt,
+            retry_in,
+        } => log_daemon_line(&format!(
+            "connect failed (attempt {attempt}): {error}; retrying in {:.1}s",
+            retry_in.as_secs_f64()
+        )),
+        DaemonEvent::MessageProcessed {
+            message,
+            records,
+            duplicate,
+        } => {
+            if quiet {
+                return;
+            }
+            let payload = message.payload.as_ref();
+            let cccc = payload.map(|payload| payload.cccc.as_str()).unwrap_or("-");
+            let awips = payload
+                .map(|payload| payload.awips_id.as_str())
+                .unwrap_or("-");
+            if *duplicate {
+                log_daemon_line(&format!("duplicate {cccc} {awips}"));
+            } else if let Some(record) = records.first() {
+                log_daemon_line(&format!(
+                    "archived {cccc} {awips} family={:?} fingerprint={}",
+                    record.metadata.family, record.fingerprint
+                ));
+            } else {
+                log_daemon_line(&format!("archived {cccc} {awips}"));
+            }
+        }
+        DaemonEvent::MessageSkipped { reason } => {
+            if !quiet {
+                log_daemon_line(&format!("skipped: {reason}"));
+            }
+        }
+        DaemonEvent::IngestFailed { error } => log_daemon_line(&format!("ingest failed: {error}")),
+        DaemonEvent::SilentRead { .. } => {}
+        DaemonEvent::Disconnected { error, retry_in } => match error {
+            Some(error) => log_daemon_line(&format!(
+                "disconnected: {error}; reconnecting in {:.1}s",
+                retry_in.as_secs_f64()
+            )),
+            None => log_daemon_line(&format!(
+                "no traffic or keepalive response; reconnecting in {:.1}s",
+                retry_in.as_secs_f64()
+            )),
+        },
+        DaemonEvent::ShuttingDown => log_daemon_line("shutting down"),
+    }
 }
 
 fn format_utc_now() -> Result<String, CliError> {
@@ -3584,6 +3726,46 @@ impl Default for OiArchiveOptions {
     }
 }
 
+#[derive(Debug)]
+struct OiDaemonOptions {
+    username: Option<String>,
+    password: Option<String>,
+    history: u32,
+    reconnect_history: u32,
+    max_messages: Option<u64>,
+    archive_duplicates: bool,
+    quiet: bool,
+    host: Option<String>,
+    domain: Option<String>,
+    port: Option<u16>,
+    room: Option<String>,
+    room_service: Option<String>,
+    nickname: Option<String>,
+    resource: Option<String>,
+}
+
+impl Default for OiDaemonOptions {
+    fn default() -> Self {
+        let defaults = DaemonOptions::default();
+        Self {
+            username: None,
+            password: None,
+            history: defaults.initial_history,
+            reconnect_history: defaults.reconnect_history,
+            max_messages: None,
+            archive_duplicates: false,
+            quiet: false,
+            host: None,
+            domain: None,
+            port: None,
+            room: None,
+            room_service: None,
+            nickname: None,
+            resource: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct OiArchiveReport {
     archive_dir: String,
@@ -3679,7 +3861,7 @@ struct OiArchiveJsonlReport<'a> {
 mod tests {
     use super::{
         InputKind, canonical_record_relative_path, fingerprint_hex, inspect_bytes,
-        oi_message_to_archive_xml, parse_hint_value, sanitize_component,
+        parse_hint_value, sanitize_component,
     };
     use nwws_rs::{
         ArchiveStore as RuntimeArchiveStore, DedupeStore, IngestHint, IngestService, MessageRouter,
@@ -3731,7 +3913,7 @@ mod tests {
             "../../tests/fixtures/nwws_oi_tornado_warning.xml"
         ))
         .unwrap();
-        let xml = oi_message_to_archive_xml(&message).unwrap();
+        let xml = message.to_archive_xml().unwrap();
         let reparsed = NwwsOiMessage::parse(&xml).unwrap();
 
         assert_eq!(

@@ -28,6 +28,100 @@ impl NwwsOiMessage {
         }
         Ok(())
     }
+
+    /// Re-serialize this message into canonical NWWS-OI archive XML so live
+    /// captures round-trip through the same ingest path as archived stanzas.
+    ///
+    /// Fails with `MissingField` when the message carries no `<x xmlns='nwws-oi'>`
+    /// payload (presence updates, plain chat).
+    pub fn to_archive_xml(&self) -> Result<String> {
+        let payload = self
+            .payload
+            .as_ref()
+            .ok_or_else(|| ParseError::new(ErrorKind::MissingField("nwws-oi payload")))?;
+        let issue = payload
+            .issue
+            .format(&Rfc3339)
+            .map_err(|_| ParseError::new(ErrorKind::InvalidField("nwws-oi issue time")))?;
+        let mut xml = String::new();
+
+        xml.push_str("<message");
+        push_xml_attr(
+            &mut xml,
+            "type",
+            self.stanza_type.as_deref().unwrap_or("groupchat"),
+        );
+        if let Some(from) = self.from.as_deref() {
+            push_xml_attr(&mut xml, "from", from);
+        }
+        if let Some(to) = self.to.as_deref() {
+            push_xml_attr(&mut xml, "to", to);
+        }
+        xml.push('>');
+
+        if let Some(summary) = self.summary.as_deref() {
+            xml.push_str("<body>");
+            xml.push_str(&escape_xml_text(summary));
+            xml.push_str("</body>");
+        }
+        if let Some(summary) = self.xhtml_summary.as_deref() {
+            xml.push_str("<html xmlns='http://jabber.org/protocol/xhtml-im'><body xmlns='http://www.w3.org/1999/xhtml'>");
+            xml.push_str(&escape_xml_text(summary));
+            xml.push_str("</body></html>");
+        }
+
+        xml.push_str("<x xmlns='nwws-oi'");
+        push_xml_attr(&mut xml, "cccc", &payload.cccc);
+        push_xml_attr(&mut xml, "ttaaii", &payload.ttaaii);
+        push_xml_attr(&mut xml, "issue", &issue);
+        push_xml_attr(&mut xml, "awipsid", &payload.awips_id);
+        push_xml_attr(
+            &mut xml,
+            "id",
+            &format!("{}.{}", payload.id.process_id, payload.id.sequence),
+        );
+        xml.push('>');
+        xml.push_str(&escape_xml_text(&payload.raw_bulletin));
+        xml.push_str("</x></message>");
+
+        Ok(xml)
+    }
+}
+
+fn push_xml_attr(xml: &mut String, key: &str, value: &str) {
+    xml.push(' ');
+    xml.push_str(key);
+    xml.push_str("='");
+    xml.push_str(&escape_xml_attr(value));
+    xml.push('\'');
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\'' => escaped.push_str("&apos;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn escape_xml_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

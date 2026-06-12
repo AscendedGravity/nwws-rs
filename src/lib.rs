@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod api;
+pub mod daemon;
 pub mod error;
 pub mod geo;
 pub mod header;
@@ -30,6 +31,10 @@ pub use api::{
     WrapperSummary, active_warnings_at, active_warnings_at_time, archive_import, archive_verify,
     inspect_bytes, inspect_oi_message, inspect_path, inspect_text, scan_path, split_pid201_bytes,
     split_pid201_path, to_json, write_pid201_split,
+};
+pub use daemon::{
+    BackoffPolicy, DaemonEvent, DaemonOptions, DaemonSummary, OiMessageSource,
+    run as run_oi_daemon, run_with as run_oi_daemon_with,
 };
 pub use error::{ErrorKind, ParseError, Result};
 pub use geo::{LatLonBlock, MotionLocation, TimeMotLoc};

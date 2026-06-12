@@ -338,6 +338,14 @@ where
         Ok(())
     }
 
+    /// Send an XMPP whitespace keepalive (RFC 6120 section 4.6) to hold the
+    /// connection open across quiet feed periods.
+    pub fn send_keepalive(&mut self) -> Result<()> {
+        self.stream.write_all(b" ")?;
+        self.stream.flush()?;
+        Ok(())
+    }
+
     pub fn into_inner(self) -> S {
         self.stream
     }
