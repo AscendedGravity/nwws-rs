@@ -1,0 +1,8 @@
+# WMO bulletins are byte-exact test inputs (\r\r\n framing, control bytes).
+# Never let git convert their line endings, or Windows checkouts corrupt them.
+tests/fixtures/** -text
+fuzz/corpus/** -text
+
+# Keep sources LF everywhere so checkouts are identical across platforms.
+* text=auto eol=lf
+*.ps1 text eol=crlf
