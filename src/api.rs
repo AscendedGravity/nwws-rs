@@ -1679,6 +1679,13 @@ fn family_name(family: ProductFamily) -> String {
         ProductFamily::Watch => "watch",
         ProductFamily::Advisory => "advisory",
         ProductFamily::Administrative => "administrative",
+        ProductFamily::WinterWeather => "winter-weather",
+        ProductFamily::Tropical => "tropical",
+        ProductFamily::FireWeather => "fire-weather",
+        ProductFamily::Aviation => "aviation",
+        ProductFamily::Tsunami => "tsunami",
+        ProductFamily::Observation => "observation",
+        ProductFamily::Climate => "climate",
         ProductFamily::Unknown => "unknown",
     }
     .to_owned()

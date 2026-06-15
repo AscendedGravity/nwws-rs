@@ -519,6 +519,13 @@ pub fn family_slug(family: ProductFamily) -> &'static str {
         ProductFamily::Watch => "watch",
         ProductFamily::Advisory => "advisory",
         ProductFamily::Administrative => "administrative",
+        ProductFamily::WinterWeather => "winter_weather",
+        ProductFamily::Tropical => "tropical",
+        ProductFamily::FireWeather => "fire_weather",
+        ProductFamily::Aviation => "aviation",
+        ProductFamily::Tsunami => "tsunami",
+        ProductFamily::Observation => "observation",
+        ProductFamily::Climate => "climate",
         ProductFamily::Unknown => "unknown",
     }
 }

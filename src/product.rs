@@ -22,6 +22,13 @@ pub enum ProductFamily {
     Watch,
     Advisory,
     Administrative,
+    WinterWeather,
+    Tropical,
+    FireWeather,
+    Aviation,
+    Tsunami,
+    Observation,
+    Climate,
     Unknown,
 }
 
@@ -522,7 +529,9 @@ fn classify_family(
 }
 
 fn classify_awips_nnn(nnn: &str) -> ProductFamily {
+    // Exact PIL matches first
     match nnn {
+        // ── Existing families (unchanged) ──
         "TOR" => ProductFamily::Tornado,
         "SVR" => ProductFamily::SevereThunderstorm,
         "FFW" => ProductFamily::FlashFlood,
@@ -534,6 +543,77 @@ fn classify_awips_nnn(nnn: &str) -> ProductFamily {
         "HWO" | "NPW" | "CFW" => ProductFamily::Advisory,
         "WSW" | "FFA" => ProductFamily::Watch,
         "PNS" => ProductFamily::Administrative,
+
+        // ── Existing families: expanded coverage ──
+        // Flood
+        "FLN" | "ESF" | "FFG" | "FFH" | "FFS" => ProductFamily::Flood,
+        // Marine
+        "GLF" | "CWF" | "MWS" | "NSH" | "HSF" | "CPF" | "OFF" | "MAW" | "MFM" | "MIM" | "MRP"
+        | "MVF" | "OSW" | "SRF" | "SRD" | "GLS" | "ICE" | "IDM" | "IOB" => ProductFamily::Marine,
+        // Discussion
+        "PMD" | "SWO" | "HMD" => ProductFamily::Discussion,
+        // Forecast
+        "ZFP" | "SFP" | "LFP" | "AFM" | "AFP" | "EFP" | "EOL" | "NOW" | "OZF" | "PFM" | "PRE"
+        | "CCF" | "COD" | "FTP" | "RDF" | "TAV" | "TVL" | "PRB" | "PTS" | "QPF" | "RTP" | "NWR"
+        | "AWO" | "AWS" | "AWU" | "SFT" => ProductFamily::Forecast,
+        // Hydrology
+        "RVF" | "RVI" | "RVM" | "RVR" | "HYD" | "HYM" | "ESG" | "ESP" | "ESS" | "LKE" | "MAP"
+        | "POE" | "QPS" | "RNS" | "RRS" | "RRA" | "RRM" | "RSD" | "RSM" | "HML" => {
+            ProductFamily::Hydrology
+        }
+        // Watch
+        "WCN" | "WOU" | "SEL" | "SAW" | "AVA" | "AVW" | "AVG" | "SAB" | "SAG" => {
+            ProductFamily::Watch
+        }
+        // Advisory
+        "AQA" | "AQI" | "ASA" | "DSA" | "SDS" | "DDO" | "CWA" | "CWS" => ProductFamily::Advisory,
+        // Administrative
+        "ADR" | "ADM" | "ADA" | "FTM" | "KPA" | "NOX" | "SOO" | "DMO" | "RMT" | "RWT" | "MTT"
+        | "RET" | "FSH" | "INI" | "GRE" | "VER" => ProductFamily::Administrative,
+
+        // ── New: WinterWeather ──
+        "SQW" | "FZL" | "WSF" | "EWS" => ProductFamily::WinterWeather,
+
+        // ── New: Tropical ──
+        "TCD" | "TCP" | "TCM" | "TWO" | "TWS" | "HLS" | "TWD" | "TCU" | "TCV" | "PWS" | "PSH"
+        | "CHG" | "TCE" | "SPF" | "STD" | "TCS" => ProductFamily::Tropical,
+
+        // ── New: FireWeather ──
+        "RFW" | "FWF" | "FWD" | "FWS" | "AFW" | "FDI" | "PFW" | "FRW" | "FWA" | "FWM" | "FWN"
+        | "FWO" | "FWL" | "SMF" | "RFD" | "STQ" => ProductFamily::FireWeather,
+
+        // ── New: Aviation ──
+        "TAF" | "SIG" | "OFA" | "TAP" | "VFT" | "AWW" | "WST" | "WSV" | "OAV" => {
+            ProductFamily::Aviation
+        }
+
+        // ── New: Tsunami ──
+        "TSU" | "TIB" | "EQI" | "TMA" => ProductFamily::Tsunami,
+
+        // ── New: Observation ──
+        "MTR" | "LSR" | "LTG" | "BOY" | "SHP" | "SSM" | "OBS" | "DSM" | "SDO" | "LCO" | "MAN"
+        | "SGL" | "ABV" | "OUA" | "CGR" | "TID" | "HRR" | "HWR" | "BRG" | "PRC" | "MOB" | "LLS"
+        | "LOW" | "RRY" | "AGO" => ProductFamily::Observation,
+
+        // ── New: Climate ──
+        "CLI" | "CLM" | "LCD" | "RER" | "CF6" | "CLA" | "CLQ" | "CLS" | "CMM" | "MSM" | "STA"
+        | "STP" | "TPT" | "CLT" | "SCD" | "SCN" => ProductFamily::Climate,
+
+        // Prefix-based numeric-suffix PILs (checked after all exact matches)
+        _ if nnn.len() >= 3 => {
+            let prefix = &nnn[..2];
+            match prefix {
+                "WA" => ProductFamily::Aviation,  // WA0..WA9 AIRMET
+                "WS" => ProductFamily::Aviation,  // WS1..WS6 SIGMET
+                "FA" => ProductFamily::Aviation,  // FA0..FA9 Aviation Area Fcst
+                "FD" => ProductFamily::Aviation,  // FD0..FD9 Winds Aloft Fcst
+                "RR" => ProductFamily::Hydrology, // RR1..RR9 Hydro-Met Data
+                "HD" => ProductFamily::Hydrology, // HD1..HD9 RFC QPF Data
+                "HP" => ProductFamily::Hydrology, // HP1..HP8 RFC QPF Verification
+                _ => ProductFamily::Unknown,
+            }
+        }
+
         _ => ProductFamily::Unknown,
     }
 }
