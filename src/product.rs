@@ -142,6 +142,10 @@ impl<'a> ProductSegment<'a> {
         let mut pvtec = Vec::new();
         while cursor < lines.len() {
             let text = lines[cursor].text.trim();
+            if text.is_empty() {
+                cursor += 1;
+                continue;
+            }
             if !text.starts_with('/') {
                 break;
             }
@@ -157,6 +161,10 @@ impl<'a> ProductSegment<'a> {
         let mut hvtec = Vec::new();
         while cursor < lines.len() {
             let text = lines[cursor].text.trim();
+            if text.is_empty() {
+                cursor += 1;
+                continue;
+            }
             if !text.starts_with('/') {
                 break;
             }

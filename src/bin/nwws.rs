@@ -672,6 +672,7 @@ fn parse_oi_connect_options(
             "--resource" => {
                 options.resource = Some(parse_string_arg("oi connect", "--resource", args)?)
             }
+            "--dump-stanzas" => options.dump_stanzas = true,
             other => {
                 return Err(CliError::usage(format!(
                     "unexpected extra argument for oi connect: {other}\n\n{}",
@@ -714,6 +715,7 @@ fn parse_oi_archive_options(
             "--resource" => {
                 options.resource = Some(parse_string_arg("oi archive", "--resource", args)?)
             }
+            "--dump-stanzas" => options.dump_stanzas = true,
             "--format" => {
                 if options.output != OutputFormat::Text {
                     return Err(CliError::usage(format!(
@@ -785,6 +787,7 @@ fn parse_oi_daemon_options(
             "--resource" => {
                 options.resource = Some(parse_string_arg("oi daemon", "--resource", args)?)
             }
+            "--dump-stanzas" => options.dump_stanzas = true,
             other => {
                 return Err(CliError::usage(format!(
                     "unexpected extra argument for oi daemon: {other}\n\n{}",
@@ -1275,10 +1278,14 @@ fn oi_connect_command(
     if let Some(resource) = options.resource {
         config.resource = resource;
     }
+    config.dump_stanzas = options.dump_stanzas;
 
     let mut client = NwwsOiClient::connect(config.clone())
         .map_err(|err| CliError::failure(format!("failed to connect to NWWS-OI: {err}")))?;
 
+    if config.dump_stanzas {
+        eprintln!("--- dump-stanzas enabled ---");
+    }
     println!("connected: yes");
     println!("jid: {}", client.jid().unwrap_or("-"));
     println!("room: {}", config.room_address());
@@ -1339,6 +1346,7 @@ fn oi_archive_command(
     if let Some(resource) = options.resource.as_deref() {
         config.resource = resource.to_owned();
     }
+    config.dump_stanzas = options.dump_stanzas;
     if let Some(duration) = options.duration {
         config.read_timeout = Some(config.read_timeout.unwrap_or(duration).min(duration));
     }
@@ -1567,6 +1575,7 @@ fn oi_daemon_command(archive_dir: &Path, options: OiDaemonOptions) -> Result<(),
     if let Some(resource) = options.resource {
         config.resource = resource;
     }
+    config.dump_stanzas = options.dump_stanzas;
 
     let router = MessageRouter::new(Some(RuntimeArchiveStore::new(archive_dir)));
     let dedupe =
@@ -1700,6 +1709,7 @@ fn serve_command(
         if let Some(resource) = daemon_options.resource {
             config.resource = resource;
         }
+        config.dump_stanzas = daemon_options.dump_stanzas;
         Some(nwws_rs::serve::ServeIngestOptions {
             client: config,
             daemon: DaemonOptions {
@@ -3795,6 +3805,7 @@ struct OiConnectOptions {
     room_service: Option<String>,
     nickname: Option<String>,
     resource: Option<String>,
+    dump_stanzas: bool,
 }
 
 impl Default for OiConnectOptions {
@@ -3809,6 +3820,7 @@ impl Default for OiConnectOptions {
             room_service: None,
             nickname: None,
             resource: None,
+            dump_stanzas: false,
         }
     }
 }
@@ -3827,6 +3839,7 @@ struct OiArchiveOptions {
     room_service: Option<String>,
     nickname: Option<String>,
     resource: Option<String>,
+    dump_stanzas: bool,
 }
 
 impl Default for OiArchiveOptions {
@@ -3844,6 +3857,7 @@ impl Default for OiArchiveOptions {
             room_service: None,
             nickname: None,
             resource: None,
+            dump_stanzas: false,
         }
     }
 }
@@ -3857,6 +3871,7 @@ struct OiDaemonOptions {
     max_messages: Option<u64>,
     archive_duplicates: bool,
     quiet: bool,
+    dump_stanzas: bool,
     host: Option<String>,
     domain: Option<String>,
     port: Option<u16>,
@@ -3877,6 +3892,7 @@ impl Default for OiDaemonOptions {
             max_messages: None,
             archive_duplicates: false,
             quiet: false,
+            dump_stanzas: false,
             host: None,
             domain: None,
             port: None,

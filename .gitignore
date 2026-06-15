@@ -6,3 +6,4 @@ __pycache__/
 /python/nwws_rs/_native*.dll
 /python/nwws_rs/_native*.dylib
 /.venv
+/archive

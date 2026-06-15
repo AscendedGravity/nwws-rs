@@ -99,9 +99,16 @@ fn parse_bulletin<'a>(
         _ => (None, bulletin),
     };
 
+    // The CDATA format used by the current NWWS-OI server injects blank
+    // lines between bulletin fields; skip them so we still find the
+    // WMO heading, AWIPS ID, and body below.
+    let after_sequence = skip_blank_lines(after_sequence);
+
     let (heading_line, after_heading) = split_line(after_sequence)
         .ok_or_else(|| ParseError::new(ErrorKind::UnexpectedEof("wmo heading line")))?;
     let heading = WmoHeading::parse(heading_line)?;
+
+    let after_heading = skip_blank_lines(after_heading);
 
     let (awips_id, body) = match split_line(after_heading) {
         Some((candidate, rest)) if looks_like_awips_id(candidate) => {
@@ -119,6 +126,16 @@ fn parse_bulletin<'a>(
         awips_id,
         body: strip_one_line_break(body),
     })
+}
+
+/// Advance past any leading CR/LF characters to the next non-empty line.
+fn skip_blank_lines(input: &str) -> &str {
+    let bytes = input.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() && (bytes[start] == b'\n' || bytes[start] == b'\r') {
+        start += 1;
+    }
+    &input[start..]
 }
 
 fn split_line(input: &str) -> Option<(&str, &str)> {
@@ -216,5 +233,21 @@ mod tests {
                 .verify_metadata("SRUS84", "KARX", Some("RR8ARX"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn parses_cdata_style_bulletin_with_blank_lines_between_fields() {
+        // The College Park NWWS-OI server wraps bulletin text in CDATA which
+        // introduces blank lines between the sequence number, WMO heading,
+        // AWIPS ID, and body.  The parser must skip them.
+        let input = "346\n\nCDUS41 KILN 152056\n\nCLIDAY\n\nbody line 1\nbody line 2\n\n$$";
+        let message = WmoMessage::parse_str(input).unwrap();
+        assert_eq!(message.sequence_number, Some(346));
+        assert_eq!(message.heading.ttaaii(), "CDUS41");
+        assert_eq!(message.heading.cccc(), "KILN");
+        assert_eq!(message.awips_id.unwrap().raw(), "CLIDAY");
+        assert!(message.body.contains("body line 1"));
+        assert!(message.body.contains("body line 2"));
+        assert!(message.body.contains("$$"));
     }
 }

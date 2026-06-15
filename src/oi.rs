@@ -147,27 +147,36 @@ impl NwwsOiPayload {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NwwsOiId {
-    pub process_id: u32,
+    pub process_id: String,
     pub sequence: u64,
 }
 
 impl NwwsOiId {
     pub fn parse(input: &str) -> Result<Self> {
-        let (process_id, sequence) = input
-            .split_once('.')
-            .ok_or_else(|| ParseError::new(ErrorKind::InvalidField("nwws id")))?;
-        let process_id = process_id
-            .parse()
-            .map_err(|_| ParseError::new(ErrorKind::InvalidField("nwws id")))?;
-        let sequence = sequence
-            .parse()
-            .map_err(|_| ParseError::new(ErrorKind::InvalidField("nwws id")))?;
-        Ok(Self {
-            process_id,
-            sequence,
-        })
+        let trimmed = input.trim();
+        if let Some((process_id, sequence)) = trimmed.split_once('.') {
+            let sequence = sequence
+                .parse()
+                .map_err(|_| ParseError::new(ErrorKind::InvalidField("nwws id")))?;
+            Ok(Self {
+                process_id: process_id.to_owned(),
+                sequence,
+            })
+        } else {
+            // No dot separator: treat the entire value as a bare sequence number.
+            // The NWWS-OI server may send id values without a process-id prefix
+            // (e.g., after a server restart or during transition), so we accept
+            // a plain integer as just the sequence number with empty process_id.
+            let sequence = trimmed
+                .parse()
+                .map_err(|_| ParseError::new(ErrorKind::InvalidField("nwws id")))?;
+            Ok(Self {
+                process_id: String::new(),
+                sequence,
+            })
+        }
     }
 }
 
@@ -205,7 +214,12 @@ fn parse_message(input: &str) -> Result<NwwsOiMessage> {
                     });
                 }
                 b"x" if find_attr(&element, b"xmlns")?.as_deref() == Some("nwws-oi") => {
-                    payload_builder = Some(PayloadBuilder::from_start(&element)?);
+                    // Gracefully skip malformed NWWS-OI payloads so a single
+                    // bad stanza (e.g. unexpected id format after server
+                    // transition) does not tear down the entire connection.
+                    if let Ok(builder) = PayloadBuilder::from_start(&element) {
+                        payload_builder = Some(builder);
+                    }
                 }
                 _ => {}
             },
@@ -213,7 +227,10 @@ fn parse_message(input: &str) -> Result<NwwsOiMessage> {
                 if element.name().as_ref() == b"x"
                     && find_attr(&element, b"xmlns")?.as_deref() == Some("nwws-oi")
                 {
-                    message.payload = Some(PayloadBuilder::from_start(&element)?.finish());
+                    // Gracefully skip malformed self-closing payloads too.
+                    if let Ok(builder) = PayloadBuilder::from_start(&element) {
+                        message.payload = Some(builder.finish());
+                    }
                 }
             }
             Ok(Event::End(element)) => match element.name().as_ref() {
@@ -409,7 +426,7 @@ RR8ARX
         assert_eq!(
             payload.id,
             NwwsOiId {
-                process_id: 10313,
+                process_id: "10313".to_owned(),
                 sequence: 6
             }
         );
@@ -425,7 +442,26 @@ RR8ARX
     }
 
     #[test]
-    fn rejects_bad_id() {
-        assert!(NwwsOiId::parse("10313").is_err());
+    fn id_without_dot_parses_as_bare_sequence() {
+        // The NWWS-OI server may send a plain integer id without a
+        // process-id prefix; treat it as sequence number with process_id = 0.
+        let id = NwwsOiId::parse("10313").unwrap();
+        assert_eq!(id.process_id, "");
+        assert_eq!(id.sequence, 10313);
+    }
+
+    #[test]
+    fn rejects_non_numeric_id() {
+        assert!(NwwsOiId::parse("abc").is_err());
+        assert!(NwwsOiId::parse("").is_err());
+        assert!(NwwsOiId::parse("10313.abc").is_err());
+    }
+
+    #[test]
+    fn accepts_string_process_id() {
+        // College Park server uses labels like "nwws_processor.4640"
+        let id = NwwsOiId::parse("nwws_processor.4640").unwrap();
+        assert_eq!(id.process_id, "nwws_processor");
+        assert_eq!(id.sequence, 4640);
     }
 }

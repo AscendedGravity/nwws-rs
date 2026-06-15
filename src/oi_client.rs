@@ -95,6 +95,7 @@ pub struct OiClientConfig {
     pub connect_timeout: Duration,
     pub read_timeout: Option<Duration>,
     pub write_timeout: Option<Duration>,
+    pub dump_stanzas: bool,
 }
 
 impl OiClientConfig {
@@ -117,6 +118,7 @@ impl OiClientConfig {
             connect_timeout: Duration::from_secs(15),
             read_timeout: Some(Duration::from_secs(30)),
             write_timeout: Some(Duration::from_secs(30)),
+            dump_stanzas: false,
         }
     }
 
@@ -325,9 +327,35 @@ where
                 continue;
             }
 
-            let message = NwwsOiMessage::parse(&xml)?;
-            if message.payload.is_some() {
-                return Ok(message);
+            if self.config.dump_stanzas {
+                let truncated = if xml.len() > 2000 {
+                    format!("{}... (truncated, {} total bytes)", &xml[..2000], xml.len())
+                } else {
+                    xml.clone()
+                };
+                eprintln!("--- stanza ({} bytes) ---", xml.len());
+                eprintln!("{truncated}");
+                eprintln!("--- end stanza ---");
+            }
+
+            match NwwsOiMessage::parse(&xml) {
+                Ok(message) => {
+                    if self.config.dump_stanzas {
+                        if message.payload.is_some() {
+                            eprintln!("--- parse: OK (payload present) ---");
+                        } else {
+                            eprintln!("--- parse: OK (payload=None, skipping) ---");
+                        }
+                    }
+                    if message.payload.is_some() {
+                        return Ok(message);
+                    }
+                }
+                Err(err) => {
+                    if self.config.dump_stanzas {
+                        eprintln!("--- parse: FAILED ({err}) ---");
+                    }
+                }
             }
         }
     }

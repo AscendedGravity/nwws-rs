@@ -107,7 +107,7 @@ fn validates_nwws_oi_warning_fixture_against_embedded_bulletin() {
 
     let payload = message.payload.unwrap();
     let bulletin = payload.parse_bulletin().unwrap();
-    assert_eq!(payload.id.process_id, 41001);
+    assert_eq!(payload.id.process_id, "41001");
     assert_eq!(payload.id.sequence, 17);
     assert_eq!(bulletin.heading.ttaaii(), "WUUS53");
     assert_eq!(bulletin.heading.cccc(), "KLOT");
@@ -165,7 +165,7 @@ fn validates_segmented_nwws_oi_fixture() {
 
     let payload = message.payload.unwrap();
     let bulletin = payload.parse_bulletin().unwrap();
-    assert_eq!(payload.id.process_id, 41001);
+    assert_eq!(payload.id.process_id, "41001");
     assert_eq!(payload.id.sequence, 18);
     assert_eq!(bulletin.awips_id.unwrap().raw(), "SVSLOT");
     assert_eq!(bulletin.body.matches("$$").count(), 2);
