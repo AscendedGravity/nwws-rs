@@ -137,7 +137,11 @@ pub struct NwwsOiPayload {
 impl NwwsOiPayload {
     pub fn parse_bulletin(&self) -> Result<WmoMessage<'_>> {
         let bulletin = WmoMessage::parse_str(&self.raw_bulletin)?;
-        bulletin.verify_metadata(&self.ttaaii, &self.cccc, Some(&self.awips_id))?;
+        // Verify critical routing fields (ttaaii, cccc) but tolerate
+        // AWIPS ID mismatches: the OI wrapper metadata is authoritative,
+        // and some bulletins lack a body AWIPS ID line or use a variant
+        // format that the parser doesn't recognise.
+        bulletin.verify_metadata(&self.ttaaii, &self.cccc, None)?;
         Ok(bulletin)
     }
 

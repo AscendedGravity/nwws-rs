@@ -42,12 +42,15 @@ fn parses_framed_fixture_and_scanner() {
 }
 
 #[test]
-fn rejects_mismatched_payload_metadata() {
+fn accepts_mismatched_awipsid_in_payload_metadata() {
     let xml = include_str!("fixtures/nwws_oi_example.xml")
         .replace("awipsid='RR8ARX'", "awipsid='AFDLWX'");
     let message = NwwsOiMessage::parse(&xml).unwrap();
     let payload = message.payload.unwrap();
-    assert!(payload.validate().is_err());
+    // AWIPS ID mismatch is tolerated; the wrapper metadata is authoritative.
+    payload.validate().unwrap();
+    let bulletin = payload.parse_bulletin().unwrap();
+    assert_eq!(bulletin.awips_id.unwrap().raw(), "RR8ARX");
 }
 
 #[test]
@@ -174,7 +177,7 @@ fn validates_segmented_nwws_oi_fixture() {
 }
 
 #[test]
-fn invalid_awips_variant_stays_in_body_and_breaks_wrapper_validation() {
+fn invalid_awips_variant_stays_in_body_and_is_tolerated_by_wrapper() {
     let bare = include_str!("fixtures/wmo_tornado_warning.txt").replace("TORLOT\n", "TOR-LOT\n");
     let message = WmoMessage::parse_str(&bare).unwrap();
     assert!(message.awips_id.is_none());
@@ -182,8 +185,10 @@ fn invalid_awips_variant_stays_in_body_and_breaks_wrapper_validation() {
 
     let xml = include_str!("fixtures/nwws_oi_tornado_warning.xml").replace("TORLOT\n", "TOR-LOT\n");
     let payload = NwwsOiMessage::parse(&xml).unwrap().payload.unwrap();
-    let err = payload.validate().unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Mismatch("awips id"));
+    // AWIPS ID mismatch is tolerated; the wrapper metadata is authoritative.
+    payload.validate().unwrap();
+    let bulletin = payload.parse_bulletin().unwrap();
+    assert!(bulletin.awips_id.is_none());
 }
 
 #[test]
