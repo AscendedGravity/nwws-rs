@@ -62,8 +62,8 @@ pub use replay::{
 };
 pub use runtime::{
     ArchiveRecord, ArchiveStore, ArchivedMetadata, DedupeStore, IngestService, MessageRouter,
-    Pid201IngestSession, ProcessReport, RecordSource, Route, RouteRule, RuntimeError, family_slug,
-    semantic_fingerprint,
+    Pid201IngestSession, ProcessReport, PruneReport, RecordSource, Route, RouteRule, RuntimeError,
+    family_slug, semantic_fingerprint,
 };
 pub use stream::{FramedChunk, FramedMessageIter, ScanOutcome, WmoStreamScanner};
 pub use ugc::{UgcCode, UgcPurgeTime, UgcString};

@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use nwws_rs::{
     ArchiveStore as RuntimeArchiveStore, DaemonEvent, DaemonOptions, DedupeStore,
     FramedStreamIngest, IngestHint, IngestService, MessageRouter, NwwsContent, NwwsOiClient,
-    NwwsOiMessage, OiClientConfig, ParsedInput, ProductFamily, TransportDescriptor, TransportKind,
-    WarningPoint, collect_input_paths, infer_hint_from_path, lead_time_event_metrics,
-    parse_with_hint, polygon_timeline, polygon_timeline_at, run_oi_daemon,
+    NwwsOiMessage, OiClientConfig, ParsedInput, ProductFamily, PruneReport, TransportDescriptor,
+    TransportKind, WarningPoint, collect_input_paths, infer_hint_from_path,
+    lead_time_event_metrics, parse_with_hint, polygon_timeline, polygon_timeline_at, run_oi_daemon,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -151,6 +151,11 @@ fn archive_command(args: &mut impl Iterator<Item = OsString>) -> Result<(), CliE
             let options = parse_lead_time_options("archive lead-time", args)?;
             lead_time_command(&archive, options)
         }
+        "prune" => {
+            let archive = take_path_arg("archive prune", args)?;
+            let options = parse_prune_options(args)?;
+            archive_prune_command(&archive, options)
+        }
         other => Err(CliError::usage(format!(
             "unknown archive subcommand {other}\n\n{}",
             usage()
@@ -229,6 +234,7 @@ fn usage() -> &'static str {
   cargo run --bin nwws -- archive active-at <archive-dir> --at <utc-rfc3339> [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- archive timeline <archive-dir> [--at <utc-rfc3339>] [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- archive lead-time <archive-dir> --event-at <utc-rfc3339> --lat <degrees> --lon <degrees> [--format <text|json|jsonl|tool-result>]
+  cargo run --bin nwws -- archive prune <archive-dir> [--keep-days <N>] [--dry-run] [--format <text|json|jsonl|tool-result>]
 
 commands:
   inspect          parse one file and print detailed NWWS metadata
@@ -252,6 +258,8 @@ commands:
   archive active-at query archived warning records active at a reference UTC
   archive timeline query archived warning lifecycle/timeline records
   archive lead-time compute warning lead-time metrics from an archive
+  archive prune    remove archived records older than --keep-days (default 30);
+                   --dry-run previews what would be deleted without removing anything
 
 notes:
   Machine-readable modes are available with --format json, --format jsonl, or --format tool-result.
@@ -588,6 +596,87 @@ fn parse_lead_time_options(
             "missing --lon for {command}\n\n{}",
             usage()
         )));
+    }
+
+    Ok(options)
+}
+
+#[derive(Debug)]
+struct PruneOptions {
+    keep_days: u32,
+    dry_run: bool,
+    output: OutputFormat,
+}
+
+impl Default for PruneOptions {
+    fn default() -> Self {
+        Self {
+            keep_days: 30,
+            dry_run: false,
+            output: OutputFormat::Text,
+        }
+    }
+}
+
+fn parse_prune_options(
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<PruneOptions, CliError> {
+    let mut options = PruneOptions::default();
+
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--keep-days" => {
+                let value = parse_u32_arg("archive prune", "--keep-days", args)?;
+                if value < 1 {
+                    return Err(CliError::usage(format!(
+                        "--keep-days must be >= 1 for archive prune\n\n{}",
+                        usage()
+                    )));
+                }
+                options.keep_days = value;
+            }
+            "--dry-run" => {
+                if options.dry_run {
+                    return Err(CliError::usage(format!(
+                        "duplicate --dry-run for archive prune\n\n{}",
+                        usage()
+                    )));
+                }
+                options.dry_run = true;
+            }
+            "--format" => {
+                if options.output != OutputFormat::Text {
+                    return Err(CliError::usage(format!(
+                        "duplicate --format for archive prune\n\n{}",
+                        usage()
+                    )));
+                }
+                let Some(value) = args.next() else {
+                    return Err(CliError::usage(format!(
+                        "missing value for --format in archive prune\n\n{}",
+                        usage()
+                    )));
+                };
+                options.output = parse_output_format(&value.to_string_lossy())?;
+            }
+            "--json" => set_output_flag("archive prune", &mut options.output, OutputFormat::Json)?,
+            "--jsonl" => {
+                set_output_flag("archive prune", &mut options.output, OutputFormat::Jsonl)?;
+            }
+            "--tool-result" => {
+                set_output_flag(
+                    "archive prune",
+                    &mut options.output,
+                    OutputFormat::ToolResult,
+                )?;
+            }
+            other => {
+                return Err(CliError::usage(format!(
+                    "unexpected extra argument for archive prune: {other}\n\n{}",
+                    usage()
+                )));
+            }
+        }
     }
 
     Ok(options)
@@ -1632,6 +1721,7 @@ fn serve_command(
 ) -> Result<(), CliError> {
     let mut bind: std::net::SocketAddr = "127.0.0.1:8080".parse().expect("valid default bind");
     let mut no_ingest = false;
+    let mut retention_days: Option<std::num::NonZeroU32> = None;
     let mut daemon_options = OiDaemonOptions::default();
 
     while let Some(arg) = args.next() {
@@ -1672,6 +1762,16 @@ fn serve_command(
             }
             "--resource" => {
                 daemon_options.resource = Some(parse_string_arg("serve", "--resource", args)?)
+            }
+            "--retention-days" => {
+                let days = parse_u32_arg("serve", "--retention-days", args)?;
+                if days < 1 {
+                    return Err(CliError::usage(format!(
+                        "--retention-days must be >= 1 for serve\n\n{}",
+                        usage()
+                    )));
+                }
+                retention_days = std::num::NonZeroU32::new(days);
             }
             other => {
                 return Err(CliError::usage(format!(
@@ -1725,6 +1825,7 @@ fn serve_command(
         bind,
         archive_dir: archive_dir.to_path_buf(),
         ingest,
+        retention_days,
     })
     .map_err(|err| CliError::failure(format!("server failed: {err}")))
 }
@@ -2137,6 +2238,123 @@ fn archive_verify_command(archive_dir: &Path, output: OutputFormat) -> Result<()
     }
 
     Ok(())
+}
+
+fn archive_prune_command(archive_dir: &Path, options: PruneOptions) -> Result<(), CliError> {
+    ensure_directory(archive_dir, "archive prune")?;
+
+    let today = OffsetDateTime::now_utc().date();
+    let cutoff = today
+        .checked_sub(time::Duration::days(i64::from(options.keep_days)))
+        .ok_or_else(|| {
+            CliError::failure("failed to compute cutoff date for archive prune".to_owned())
+        })?;
+
+    let archive = RuntimeArchiveStore::new(archive_dir);
+
+    if options.dry_run {
+        let report = archive
+            .prune_dry_run(cutoff)
+            .map_err(|err| CliError::failure(format!("archive prune dry run failed: {err}")))?;
+
+        match options.output {
+            OutputFormat::Text => print_prune_report(&report),
+            OutputFormat::Json => print_json(&report)?,
+            OutputFormat::Jsonl => print_json_line(&report)?,
+            OutputFormat::ToolResult => print_prune_tool_result(&report, archive_dir),
+        }
+        return Ok(());
+    }
+
+    let mut dedupe_path = archive_dir.to_path_buf();
+    dedupe_path.push("state");
+    dedupe_path.push("dedupe.txt");
+
+    let dedupe_removed = if dedupe_path.exists() {
+        let mut dedupe = DedupeStore::open(&dedupe_path)
+            .map_err(|err| CliError::failure(format!("failed to open dedupe store: {err}")))?;
+        dedupe
+            .prune_before(cutoff)
+            .map_err(|err| CliError::failure(format!("failed to prune dedupe store: {err}")))?
+    } else {
+        0
+    };
+
+    let report = archive
+        .prune_before(cutoff, dedupe_removed)
+        .map_err(|err| CliError::failure(format!("archive prune failed: {err}")))?;
+
+    match options.output {
+        OutputFormat::Text => print_prune_report(&report),
+        OutputFormat::Json => print_json(&report)?,
+        OutputFormat::Jsonl => print_json_line(&report)?,
+        OutputFormat::ToolResult => print_prune_tool_result(&report, archive_dir),
+    }
+
+    if !report.errors.is_empty() {
+        return Err(CliError::failure(format!(
+            "archive prune finished with {} error(s)",
+            report.errors.len()
+        )));
+    }
+
+    Ok(())
+}
+
+fn print_prune_report(report: &PruneReport) {
+    let action = if report.dry_run {
+        "would-prune"
+    } else {
+        "pruned"
+    };
+    println!("archive: {}", report.cutoff);
+    println!("retention-days: {}", report.retention_days);
+    println!("cutoff: {}", report.cutoff);
+    println!("scanned-day-dirs: {}", report.scanned_day_dirs);
+    println!("{action}-day-dirs: {}", report.removed_day_dirs);
+    println!("{action}-files: {}", report.removed_files);
+    let bytes = report.reclaimed_bytes;
+    if bytes >= 1_073_741_824 {
+        println!(
+            "{action}-bytes: {} ({:.1} GiB)",
+            bytes,
+            bytes as f64 / 1_073_741_824.0
+        );
+    } else if bytes >= 1_048_576 {
+        println!(
+            "{action}-bytes: {} ({:.1} MiB)",
+            bytes,
+            bytes as f64 / 1_048_576.0
+        );
+    } else if bytes >= 1024 {
+        println!(
+            "{action}-bytes: {} ({:.1} KiB)",
+            bytes,
+            bytes as f64 / 1024.0
+        );
+    } else {
+        println!("{action}-bytes: {bytes}");
+    }
+    println!("dedupe-entries-removed: {}", report.dedupe_entries_removed);
+    for error in &report.errors {
+        println!("  error: {error}");
+    }
+}
+
+fn print_prune_tool_result(report: &PruneReport, archive_dir: &Path) {
+    let status = if report.errors.is_empty() {
+        "ok"
+    } else {
+        "error"
+    };
+    print_tool_result(
+        "archive-prune",
+        status,
+        report,
+        tool_inputs(archive_dir, None),
+        tool_provenance("archive-prune", archive_dir, None),
+    )
+    .ok();
 }
 
 fn archive_verify_machine_command(

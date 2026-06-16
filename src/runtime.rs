@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::{Date, OffsetDateTime};
 
 use crate::ingest::{IngestHint, ParsedInput, TransportKind, parse_with_hint};
 use crate::pid201::{Pid201DrainState, Pid201Record, Pid201StreamAdapter};
@@ -80,6 +80,20 @@ pub struct ProcessReport {
     pub records: Vec<ArchiveRecord>,
 }
 
+/// Result of [`ArchiveStore::prune_before`] or [`ArchiveStore::prune_dry_run`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PruneReport {
+    pub retention_days: u32,
+    pub cutoff: String,
+    pub scanned_day_dirs: usize,
+    pub removed_day_dirs: usize,
+    pub removed_files: u64,
+    pub reclaimed_bytes: u64,
+    pub dedupe_entries_removed: usize,
+    pub errors: Vec<String>,
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ArchiveStore {
     root: PathBuf,
@@ -129,22 +143,260 @@ impl ArchiveStore {
         fs::write(&metadata_path, serde_json::to_vec_pretty(metadata)?)?;
         Ok((raw_path, metadata_path))
     }
+
+    /// Enumerate YYYY/MM/DD date-partition directories under the archive root.
+    /// Skips non-date subdirectories like `state/` or `records/`.
+    pub fn list_day_dirs(&self) -> io::Result<Vec<(Date, PathBuf)>> {
+        let mut days = Vec::new();
+        let root = &self.root;
+
+        let year_readdir = match fs::read_dir(root) {
+            Ok(dir) => dir,
+            Err(ref err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+
+        for year_entry in year_readdir {
+            let year_entry = year_entry?;
+            if !year_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let year_name = year_entry.file_name();
+            let year_str = year_name.to_string_lossy();
+            if year_str.len() != 4 || !year_str.chars().all(|ch| ch.is_ascii_digit()) {
+                continue;
+            }
+            let year: i32 = match year_str.parse() {
+                Ok(y) => y,
+                Err(_) => continue,
+            };
+
+            for month_entry in fs::read_dir(year_entry.path())? {
+                let month_entry = month_entry?;
+                if !month_entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let month_name = month_entry.file_name();
+                let month_str = month_name.to_string_lossy();
+                if month_str.len() != 2 || !month_str.chars().all(|ch| ch.is_ascii_digit()) {
+                    continue;
+                }
+                let month: u8 = match month_str.parse() {
+                    Ok(m) if (1..=12).contains(&m) => m,
+                    _ => continue,
+                };
+
+                for day_entry in fs::read_dir(month_entry.path())? {
+                    let day_entry = day_entry?;
+                    if !day_entry.file_type()?.is_dir() {
+                        continue;
+                    }
+                    let day_name = day_entry.file_name();
+                    let day_str = day_name.to_string_lossy();
+                    if day_str.len() != 2 || !day_str.chars().all(|ch| ch.is_ascii_digit()) {
+                        continue;
+                    }
+                    let day: u8 = match day_str.parse() {
+                        Ok(d) if (1..=31).contains(&d) => d,
+                        _ => continue,
+                    };
+
+                    if let Ok(date) = Date::from_calendar_date(year, month.try_into().unwrap(), day)
+                    {
+                        days.push((date, day_entry.path()));
+                    }
+                }
+            }
+        }
+
+        days.sort_by_key(|(a, _)| *a);
+        Ok(days)
+    }
+
+    /// Count files and total size under a directory tree.
+    fn count_tree(path: &Path) -> io::Result<(u64, u64)> {
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        Self::walk_count(path, &mut files, &mut bytes)?;
+        Ok((files, bytes))
+    }
+
+    fn walk_count(path: &Path, files: &mut u64, bytes: &mut u64) -> io::Result<()> {
+        if path.is_file() {
+            *files += 1;
+            if let Ok(meta) = path.metadata() {
+                *bytes += meta.len();
+            }
+            return Ok(());
+        }
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                Self::walk_count(&entry.path(), files, bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove archive day directories whose date is before `cutoff`.
+    /// Returns a [`PruneReport`] with the results. The `state/` and `records/`
+    /// directories are never touched.
+    pub fn prune_before(&self, cutoff: Date, dedupe_removed: usize) -> io::Result<PruneReport> {
+        let today = OffsetDateTime::now_utc().date();
+        let retention_days = today
+            .to_julian_day()
+            .checked_sub(cutoff.to_julian_day())
+            .unwrap_or(0) as u32;
+        let cutoff_str = cutoff.to_string();
+        let mut report = PruneReport {
+            retention_days,
+            cutoff: cutoff_str,
+            scanned_day_dirs: 0,
+            removed_day_dirs: 0,
+            removed_files: 0,
+            reclaimed_bytes: 0,
+            dedupe_entries_removed: dedupe_removed,
+            errors: Vec::new(),
+            dry_run: false,
+        };
+
+        let days = match self.list_day_dirs() {
+            Ok(days) => days,
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("failed to list day dirs: {err}"));
+                return Ok(report);
+            }
+        };
+        report.scanned_day_dirs = days.len();
+
+        for (date, path) in &days {
+            if *date >= cutoff {
+                continue;
+            }
+            report.removed_day_dirs += 1;
+
+            // Count before removing
+            match Self::count_tree(path) {
+                Ok((f, b)) => {
+                    report.removed_files += f;
+                    report.reclaimed_bytes += b;
+                }
+                Err(err) => {
+                    report
+                        .errors
+                        .push(format!("failed to count {}: {err}", path.display()));
+                }
+            }
+
+            if let Err(err) = fs::remove_dir_all(path) {
+                report
+                    .errors
+                    .push(format!("failed to remove {}: {err}", path.display()));
+                continue;
+            }
+
+            // Clean up empty ancestor directories: YYYY/MM, YYYY
+            if let Some(parent) = path.parent() {
+                remove_dir_if_empty(parent);
+                if let Some(grandparent) = parent.parent() {
+                    remove_dir_if_empty(grandparent);
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Dry-run version of [`prune_before`]: scans and counts what would be
+    /// removed without deleting anything.
+    pub fn prune_dry_run(&self, cutoff: Date) -> io::Result<PruneReport> {
+        let today = OffsetDateTime::now_utc().date();
+        let retention_days = today
+            .to_julian_day()
+            .checked_sub(cutoff.to_julian_day())
+            .unwrap_or(0) as u32;
+        let cutoff_str = cutoff.to_string();
+        let mut report = PruneReport {
+            retention_days,
+            cutoff: cutoff_str,
+            scanned_day_dirs: 0,
+            removed_day_dirs: 0,
+            removed_files: 0,
+            reclaimed_bytes: 0,
+            dedupe_entries_removed: 0,
+            errors: Vec::new(),
+            dry_run: true,
+        };
+
+        let days = match self.list_day_dirs() {
+            Ok(days) => days,
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("failed to list day dirs: {err}"));
+                return Ok(report);
+            }
+        };
+        report.scanned_day_dirs = days.len();
+
+        for (date, path) in &days {
+            if *date >= cutoff {
+                continue;
+            }
+            report.removed_day_dirs += 1;
+            match Self::count_tree(path) {
+                Ok((f, b)) => {
+                    report.removed_files += f;
+                    report.reclaimed_bytes += b;
+                }
+                Err(err) => {
+                    report
+                        .errors
+                        .push(format!("failed to count {}: {err}", path.display()));
+                }
+            }
+        }
+
+        Ok(report)
+    }
+}
+
+/// Remove `dir` if it exists and is empty. Ignores errors silently.
+fn remove_dir_if_empty(dir: &Path) {
+    if let Ok(mut readdir) = fs::read_dir(dir)
+        && readdir.next().is_none()
+    {
+        let _ = fs::remove_dir(dir);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct DedupeStore {
     index_path: PathBuf,
-    seen: HashSet<String>,
+    /// Maps fingerprint → optional captured_at RFC3339 timestamp.
+    /// `None` means the entry came from the old bare-fingerprint format
+    /// and will never be pruned (backward compatible).
+    seen: HashMap<String, Option<String>>,
 }
 
 impl DedupeStore {
     pub fn open(index_path: impl Into<PathBuf>) -> io::Result<Self> {
         let index_path = index_path.into();
-        let mut seen = HashSet::new();
+        let mut seen = HashMap::new();
         if index_path.exists() {
             for line in fs::read_to_string(&index_path)?.lines() {
-                if !line.trim().is_empty() {
-                    seen.insert(line.trim().to_owned());
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(tab) = trimmed.find('\t') {
+                    let fingerprint = &trimmed[..tab];
+                    let captured_at = trimmed[tab + 1..].to_owned();
+                    seen.insert(fingerprint.to_owned(), Some(captured_at));
+                } else {
+                    seen.insert(trimmed.to_owned(), None);
                 }
             }
         }
@@ -153,11 +405,11 @@ impl DedupeStore {
     }
 
     pub fn contains(&self, fingerprint: &str) -> bool {
-        self.seen.contains(fingerprint)
+        self.seen.contains_key(fingerprint)
     }
 
     pub fn insert(&mut self, fingerprint: &str) -> io::Result<bool> {
-        if !self.seen.insert(fingerprint.to_owned()) {
+        if self.seen.contains_key(fingerprint) {
             return Ok(false);
         }
 
@@ -165,12 +417,61 @@ impl DedupeStore {
             fs::create_dir_all(parent)?;
         }
 
+        let captured_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "unknown".to_owned());
+        self.seen
+            .insert(fingerprint.to_owned(), Some(captured_at.clone()));
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.index_path)?;
-        writeln!(file, "{fingerprint}")?;
+        writeln!(file, "{fingerprint}\t{captured_at}")?;
         Ok(true)
+    }
+
+    /// Remove fingerprints whose captured_at is before `cutoff`.
+    /// Entries with `None` timestamp (old format) are always kept.
+    /// Rewrites the dedupe file atomically.
+    pub fn prune_before(&mut self, cutoff: Date) -> io::Result<usize> {
+        let before = self.seen.len();
+        self.seen.retain(|_, captured_at| match captured_at {
+            None => true, // old format, indeterminate age → keep
+            Some(ts) => {
+                OffsetDateTime::parse(ts, &Rfc3339)
+                    .ok()
+                    .map(|dt| dt.date() >= cutoff)
+                    .unwrap_or(true) // unparseable → keep
+            }
+        });
+        let removed = before - self.seen.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        self.rewrite_index()?;
+        Ok(removed)
+    }
+
+    /// Atomically rewrite the dedupe index file.
+    fn rewrite_index(&self) -> io::Result<()> {
+        let tmp_path = self.index_path.with_extension("tmp");
+        {
+            let mut tmp = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            for (fingerprint, captured_at) in &self.seen {
+                match captured_at {
+                    Some(ts) => writeln!(tmp, "{fingerprint}\t{ts}")?,
+                    None => writeln!(tmp, "{fingerprint}")?,
+                }
+            }
+            tmp.sync_all()?;
+        }
+        fs::rename(&tmp_path, &self.index_path)?;
+        Ok(())
     }
 }
 
@@ -550,6 +851,7 @@ mod tests {
     };
     use crate::ingest::IngestHint;
     use crate::product::ProductFamily;
+    use std::fs;
 
     #[test]
     fn semantic_fingerprint_matches_bare_and_open_interface() {
@@ -703,6 +1005,252 @@ mod tests {
         let drain = session.finish();
         assert_eq!(drain.pending_bytes, 0);
         assert!(drain.discarded_junk >= 5);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_store_list_day_dirs_empty() {
+        let dir = temp_dir_path("nwws_rs_list_empty");
+        fs::create_dir_all(&dir).unwrap();
+        let store = ArchiveStore::new(&dir);
+        let days = store.list_day_dirs().unwrap();
+        assert!(days.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_store_list_day_dirs_ignores_non_date_dirs() {
+        let dir = temp_dir_path("nwws_rs_list_ignore");
+        let store = ArchiveStore::new(&dir);
+        // Create a state/ directory (should be ignored)
+        fs::create_dir_all(dir.join("state")).unwrap();
+        // Create a non-date directory (should be ignored)
+        fs::create_dir_all(dir.join("records")).unwrap();
+        // Create a valid date directory
+        fs::create_dir_all(dir.join("2026/06/01")).unwrap();
+        // Create a file (not a dir) at top level
+        fs::write(dir.join("README.txt"), b"hello").unwrap();
+
+        let days = store.list_day_dirs().unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].0.to_string(), "2026-06-01");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_store_prune_dry_run_counts_correctly() {
+        let dir = temp_dir_path("nwws_rs_prune_dry_run");
+        let store = ArchiveStore::new(&dir);
+
+        // Create some day dirs with dummy files
+        fs::create_dir_all(dir.join("2026/06/01/open_interface/KLOT")).unwrap();
+        fs::write(dir.join("2026/06/01/open_interface/KLOT/abc.txt"), b"hello").unwrap();
+        fs::create_dir_all(dir.join("2026/06/15/open_interface/KLOT")).unwrap();
+        fs::write(dir.join("2026/06/15/open_interface/KLOT/def.txt"), b"world").unwrap();
+
+        // Cutoff after 06-01 but before 06-15
+        let cutoff = time::Date::from_calendar_date(2026, time::Month::June, 10).unwrap();
+        let report = store.prune_dry_run(cutoff).unwrap();
+
+        assert_eq!(report.scanned_day_dirs, 2);
+        assert_eq!(report.removed_day_dirs, 1);
+        assert_eq!(report.removed_files, 1);
+        assert!(report.dry_run);
+        assert!(report.reclaimed_bytes > 0);
+        assert!(report.errors.is_empty());
+
+        // Verify nothing was actually deleted
+        assert!(dir.join("2026/06/01/open_interface/KLOT/abc.txt").exists());
+        assert!(dir.join("2026/06/15/open_interface/KLOT/def.txt").exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_store_prune_before_removes_old_dirs() {
+        let dir = temp_dir_path("nwws_rs_prune_before");
+        let store = ArchiveStore::new(&dir);
+
+        // Create old day dir (before cutoff) with a file
+        fs::create_dir_all(dir.join("2026/05/01/open_interface/KLOT")).unwrap();
+        fs::write(
+            dir.join("2026/05/01/open_interface/KLOT/old.txt"),
+            b"old data",
+        )
+        .unwrap();
+
+        // Create new day dir (after cutoff) with a file
+        fs::create_dir_all(dir.join("2026/06/15/open_interface/KLOT")).unwrap();
+        fs::write(
+            dir.join("2026/06/15/open_interface/KLOT/new.txt"),
+            b"new data",
+        )
+        .unwrap();
+
+        let cutoff = time::Date::from_calendar_date(2026, time::Month::June, 1).unwrap();
+        let report = store.prune_before(cutoff, 3).unwrap();
+
+        assert_eq!(report.removed_day_dirs, 1);
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(report.dedupe_entries_removed, 3);
+        assert!(!report.dry_run);
+        assert!(report.errors.is_empty());
+
+        // Old dir should be gone
+        assert!(!dir.join("2026/05/01").exists());
+        // New dir should still exist
+        assert!(dir.join("2026/06/15").exists());
+        assert!(dir.join("2026/06/15/open_interface/KLOT/new.txt").exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_store_prune_before_empty_dirs_are_cleaned() {
+        let dir = temp_dir_path("nwws_rs_prune_cleanup");
+        let store = ArchiveStore::new(&dir);
+
+        // Create a deep path under an old date
+        fs::create_dir_all(dir.join("2026/04/15/open_interface/KLOT")).unwrap();
+        fs::write(dir.join("2026/04/15/open_interface/KLOT/f.txt"), b"data").unwrap();
+
+        let cutoff = time::Date::from_calendar_date(2026, time::Month::May, 1).unwrap();
+        let _report = store.prune_before(cutoff, 0).unwrap();
+
+        // The old day dir is gone
+        assert!(!dir.join("2026/04/15").exists());
+        // The empty YYYY/MM parent and YYYY parent should also be cleaned up
+        assert!(!dir.join("2026/04").exists());
+        assert!(!dir.join("2026").exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_store_prune_before_keeps_recent_dirs() {
+        let dir = temp_dir_path("nwws_rs_prune_keep");
+        let store = ArchiveStore::new(&dir);
+
+        // All dirs are after cutoff
+        fs::create_dir_all(dir.join("2026/06/10/open_interface/KLOT")).unwrap();
+        fs::write(dir.join("2026/06/10/open_interface/KLOT/a.txt"), b"a").unwrap();
+        fs::create_dir_all(dir.join("2026/06/15/open_interface/KLOT")).unwrap();
+        fs::write(dir.join("2026/06/15/open_interface/KLOT/b.txt"), b"b").unwrap();
+
+        let cutoff = time::Date::from_calendar_date(2026, time::Month::June, 1).unwrap();
+        let report = store.prune_before(cutoff, 0).unwrap();
+
+        assert_eq!(report.removed_day_dirs, 0);
+        assert_eq!(report.removed_files, 0);
+        assert!(report.errors.is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dedupe_store_old_format_backward_compatible() {
+        let dir = temp_dir_path("nwws_rs_dedupe_old_fmt");
+        let index = dir.join("dedupe.txt");
+        fs::create_dir_all(&dir).unwrap();
+        // Old format: bare fingerprints, no timestamp column
+        fs::write(&index, b"abc123\ndef456\n").unwrap();
+
+        let store = DedupeStore::open(&index).unwrap();
+        assert!(store.contains("abc123"));
+        assert!(store.contains("def456"));
+        assert!(!store.contains("ghi789"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dedupe_store_new_format_insert_writes_timestamp() {
+        let dir = temp_dir_path("nwws_rs_dedupe_new_fmt");
+        let index = dir.join("dedupe.txt");
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut store = DedupeStore::open(&index).unwrap();
+        assert!(store.insert("abc123").unwrap());
+
+        // Verify the file contains the fingerprint followed by a tab
+        let content = fs::read_to_string(&index).unwrap();
+        assert!(content.contains("abc123\t"));
+        // Should have an RFC3339 timestamp
+        assert!(content.contains("T"));
+        assert!(content.contains("Z") || content.contains("+00:00"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dedupe_store_mixed_format_loads_correctly() {
+        let dir = temp_dir_path("nwws_rs_dedupe_mixed");
+        let index = dir.join("dedupe.txt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &index,
+            b"old_style_fingerprint\nnew_style_fingerprint\t2026-06-15T12:00:00Z\n",
+        )
+        .unwrap();
+
+        let store = DedupeStore::open(&index).unwrap();
+        assert!(store.contains("old_style_fingerprint"));
+        assert!(store.contains("new_style_fingerprint"));
+        assert!(!store.contains("missing"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dedupe_store_prune_before_respects_cutoff() {
+        let dir = temp_dir_path("nwws_rs_dedupe_prune");
+        let index = dir.join("dedupe.txt");
+        fs::create_dir_all(&dir).unwrap();
+        // Old entry (before cutoff) with timestamp
+        fs::write(
+            &index,
+            b"old_fingerprint\t2026-05-01T12:00:00Z\n\
+              new_fingerprint\t2026-06-15T12:00:00Z\n\
+              bare_fingerprint\n",
+        )
+        .unwrap();
+
+        let cutoff = time::Date::from_calendar_date(2026, time::Month::June, 1).unwrap();
+        let mut store = DedupeStore::open(&index).unwrap();
+        let removed = store.prune_before(cutoff).unwrap();
+
+        // Old entry removed (date < cutoff), new kept, bare kept (None timestamp)
+        assert_eq!(removed, 1);
+        assert!(!store.contains("old_fingerprint"));
+        assert!(store.contains("new_fingerprint"));
+        assert!(store.contains("bare_fingerprint"));
+
+        // File on disk should match
+        let reopened = DedupeStore::open(&index).unwrap();
+        assert!(!reopened.contains("old_fingerprint"));
+        assert!(reopened.contains("new_fingerprint"));
+        assert!(reopened.contains("bare_fingerprint"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dedupe_store_prune_before_noop_when_none_expired() {
+        let dir = temp_dir_path("nwws_rs_dedupe_noop");
+        let index = dir.join("dedupe.txt");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &index,
+            b"recent_fingerprint\t2026-06-15T12:00:00Z\nbare_fingerprint\n",
+        )
+        .unwrap();
+
+        let cutoff = time::Date::from_calendar_date(2026, time::Month::May, 1).unwrap();
+        let mut store = DedupeStore::open(&index).unwrap();
+        let removed = store.prune_before(cutoff).unwrap();
+
+        assert_eq!(removed, 0);
 
         std::fs::remove_dir_all(dir).unwrap();
     }

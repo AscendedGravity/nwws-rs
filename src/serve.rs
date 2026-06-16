@@ -16,6 +16,7 @@
 //! over an existing archive, which needs no NWWS-OI credentials at all.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -52,6 +53,8 @@ pub struct ServeOptions {
     pub archive_dir: PathBuf,
     /// `None` serves an existing archive read-only (no credentials needed).
     pub ingest: Option<ServeIngestOptions>,
+    /// Prune archives older than this many days. `None` = no pruning.
+    pub retention_days: Option<NonZeroU32>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +154,16 @@ pub fn run_server(options: ServeOptions) -> std::io::Result<()> {
     let (state, status) = ServeState::new(options.archive_dir.clone(), options.ingest.is_some());
 
     let shutdown = Arc::new(AtomicBool::new(false));
+
+    let prune_thread = options.retention_days.map(|retention_days| {
+        let archive_dir = options.archive_dir.clone();
+        let shutdown = shutdown.clone();
+        std::thread::Builder::new()
+            .name("nwws-prune".to_owned())
+            .spawn(move || prune_loop(archive_dir, retention_days, shutdown))
+            .expect("spawn prune thread")
+    });
+
     let ingest_thread = options.ingest.map(|ingest| {
         let archive_dir = options.archive_dir.clone();
         let live = state.live_sender();
@@ -177,6 +190,9 @@ pub fn run_server(options: ServeOptions) -> std::io::Result<()> {
 
     shutdown.store(true, Ordering::Relaxed);
     if let Some(thread) = ingest_thread {
+        let _ = thread.join();
+    }
+    if let Some(thread) = prune_thread {
         let _ = thread.join();
     }
     result
@@ -260,6 +276,52 @@ fn ingest_loop(
         },
         &shutdown,
     );
+}
+
+/// Background loop that prunes archives older than `retention_days`.
+/// Wakes every hour and checks the shutdown flag between cycles.
+fn prune_loop(archive_dir: PathBuf, retention_days: NonZeroU32, shutdown: Arc<AtomicBool>) {
+    let interval = Duration::from_secs(3600); // 1 hour
+    let archive = ArchiveStore::new(&archive_dir);
+
+    while !shutdown.load(Ordering::Relaxed) {
+        let now = OffsetDateTime::now_utc().date();
+        let days_i64 = i64::from(retention_days.get());
+        let Some(cutoff) = now.checked_sub(time::Duration::days(days_i64)) else {
+            eprintln!("[nwws-prune] invalid cutoff, skipping cycle");
+            std::thread::sleep(interval);
+            continue;
+        };
+
+        // Prune archive day directories
+        if let Err(err) = archive.prune_before(cutoff, 0) {
+            eprintln!("[nwws-prune] archive prune error: {err}");
+        }
+
+        // Prune dedupe entries
+        let dedupe_path = archive_dir.join("state").join("dedupe.txt");
+        if dedupe_path.exists() {
+            match DedupeStore::open(&dedupe_path) {
+                Ok(mut dedupe) => {
+                    if let Err(err) = dedupe.prune_before(cutoff) {
+                        eprintln!("[nwws-prune] dedupe prune error: {err}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("[nwws-prune] failed to open dedupe store: {err}");
+                }
+            }
+        }
+
+        // Sleep, but wake early if shutdown is requested
+        let deadline = Instant::now() + interval;
+        while Instant::now() < deadline {
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
 }
 
 async fn index() -> Json<Value> {
