@@ -669,7 +669,7 @@ impl IngestService {
         if !duplicate {
             self.insert_count += 1;
             if let Some(retention) = self.dedupe_retention
-                && self.insert_count % 1000 == 0
+                && self.insert_count.is_multiple_of(1000)
             {
                 let cutoff = OffsetDateTime::now_utc()
                     .checked_sub(time::Duration::seconds(retention.as_secs() as i64))
