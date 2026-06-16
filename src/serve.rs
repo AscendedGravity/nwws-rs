@@ -62,6 +62,7 @@ pub struct ServeIngestOptions {
     pub client: OiClientConfig,
     pub daemon: DaemonOptions,
     pub archive_duplicates: bool,
+    pub broadcast_mode: bool,
 }
 
 /// One live product as published on `/v1/stream`.
@@ -216,6 +217,7 @@ fn ingest_loop(
     };
     let mut service = IngestService::new(router, dedupe);
     service.set_archive_duplicates(options.archive_duplicates);
+    service.set_broadcast_mode(options.broadcast_mode);
 
     run_daemon(
         &options.client,

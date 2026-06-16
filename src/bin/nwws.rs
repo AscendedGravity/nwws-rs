@@ -224,8 +224,8 @@ fn usage() -> &'static str {
   cargo run --bin nwws -- summary <file-or-directory> [--hint <auto|oi|pid201|bulletin|stream>]
   cargo run --bin nwws -- oi connect <username> <password> [--count <n>] [--history <n>]
   cargo run --bin nwws -- oi archive <username> <password> <archive-dir> [--count <n>] [--duration <seconds>] [--history <n>] [--format <text|json|jsonl|tool-result>]
-  cargo run --bin nwws -- oi daemon <archive-dir> [--username <u>] [--password <p>] [--history <n>] [--reconnect-history <n>] [--archive-duplicates] [--quiet]
-  cargo run --bin nwws -- serve <archive-dir> [--bind <addr:port>] [--no-ingest] [--username <u>] [--password <p>] [--history <n>] [--reconnect-history <n>]
+  cargo run --bin nwws -- oi daemon <archive-dir> [--username <u>] [--password <p>] [--history <n>] [--reconnect-history <n>] [--archive-duplicates] [--broadcast] [--quiet]
+  cargo run --bin nwws -- serve <archive-dir> [--bind <addr:port>] [--no-ingest] [--broadcast] [--username <u>] [--password <p>] [--history <n>] [--reconnect-history <n>]
   cargo run --bin nwws -- pid201 inspect <capture-file> [--format <text|json|jsonl|tool-result>]
   cargo run --bin nwws -- pid201 split <capture-file> <output-dir>
   cargo run --bin nwws -- pid201 archive <capture-file> <archive-dir> [--format <text|json|jsonl|tool-result>]
@@ -245,7 +245,8 @@ commands:
   summary          aggregate detected source, transport, and family counts
   oi connect       open a blocking NWWS-OI XMPP session and print parsed messages
   oi archive       open a bounded NWWS-OI XMPP session and ingest messages into ArchiveStore
-  oi daemon        run supervised always-on ingest with auto-reconnect and history backfill
+  oi daemon        run supervised always-on ingest with auto-reconnect and history backfill;
+                   --broadcast streams parsed messages without archiving to disk
                    (credentials via --username/--password or NWWS_USERNAME/NWWS_PASSWORD)
   serve            run the ingest daemon plus a self-hosted HTTP API (SSE live stream,
                    recent products, active warnings, timeline); --no-ingest serves an
@@ -862,6 +863,7 @@ fn parse_oi_daemon_options(
                     Some(parse_positive_usize_arg("oi daemon", "--max-messages", args)? as u64);
             }
             "--archive-duplicates" => options.archive_duplicates = true,
+            "--broadcast" => options.broadcast = true,
             "--quiet" => options.quiet = true,
             "--host" => options.host = Some(parse_string_arg("oi daemon", "--host", args)?),
             "--domain" => options.domain = Some(parse_string_arg("oi daemon", "--domain", args)?),
@@ -1676,6 +1678,7 @@ fn oi_daemon_command(archive_dir: &Path, options: OiDaemonOptions) -> Result<(),
         })?;
     let mut service = IngestService::new(router, dedupe);
     service.set_archive_duplicates(options.archive_duplicates);
+    service.set_broadcast_mode(options.broadcast);
 
     let daemon_options = DaemonOptions {
         initial_history: options.history,
@@ -1747,6 +1750,7 @@ fn serve_command(
                     parse_u32_arg("serve", "--reconnect-history", args)?;
             }
             "--archive-duplicates" => daemon_options.archive_duplicates = true,
+            "--broadcast" => daemon_options.broadcast = true,
             "--host" => daemon_options.host = Some(parse_string_arg("serve", "--host", args)?),
             "--domain" => {
                 daemon_options.domain = Some(parse_string_arg("serve", "--domain", args)?)
@@ -1818,6 +1822,7 @@ fn serve_command(
                 ..DaemonOptions::default()
             },
             archive_duplicates: daemon_options.archive_duplicates,
+            broadcast_mode: daemon_options.broadcast,
         })
     };
 
@@ -4095,6 +4100,7 @@ struct OiDaemonOptions {
     reconnect_history: u32,
     max_messages: Option<u64>,
     archive_duplicates: bool,
+    broadcast: bool,
     quiet: bool,
     dump_stanzas: bool,
     host: Option<String>,
@@ -4116,6 +4122,7 @@ impl Default for OiDaemonOptions {
             reconnect_history: defaults.reconnect_history,
             max_messages: None,
             archive_duplicates: false,
+            broadcast: false,
             quiet: false,
             dump_stanzas: false,
             host: None,

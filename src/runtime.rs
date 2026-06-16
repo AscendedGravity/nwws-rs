@@ -553,6 +553,7 @@ pub struct IngestService {
     router: MessageRouter,
     dedupe: DedupeStore,
     archive_duplicates: bool,
+    broadcast_mode: bool,
 }
 
 impl IngestService {
@@ -561,11 +562,16 @@ impl IngestService {
             router,
             dedupe,
             archive_duplicates: false,
+            broadcast_mode: false,
         }
     }
 
     pub fn set_archive_duplicates(&mut self, archive_duplicates: bool) {
         self.archive_duplicates = archive_duplicates;
+    }
+
+    pub fn set_broadcast_mode(&mut self, broadcast_mode: bool) {
+        self.broadcast_mode = broadcast_mode;
     }
 
     pub fn process_bytes(&mut self, hint: IngestHint, input: &[u8]) -> Result<ProcessReport> {
@@ -627,6 +633,17 @@ impl IngestService {
     ) -> Result<()> {
         let duplicate = !self.dedupe.insert(&record.fingerprint)?;
         if duplicate && !self.archive_duplicates {
+            return Ok(());
+        }
+
+        if self.broadcast_mode {
+            output.push(ArchiveRecord {
+                fingerprint: record.fingerprint.clone(),
+                duplicate,
+                raw_path: PathBuf::new(),
+                metadata_path: PathBuf::new(),
+                metadata: record.metadata.clone(),
+            });
             return Ok(());
         }
 
