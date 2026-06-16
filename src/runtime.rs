@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
@@ -453,6 +454,26 @@ impl DedupeStore {
         Ok(removed)
     }
 
+    /// Remove fingerprints whose captured_at is before `cutoff` with
+    /// datetime-level precision. Entries with `None` timestamp are always
+    /// kept. Rewrites the dedupe file atomically.
+    pub fn prune_before_datetime(&mut self, cutoff: OffsetDateTime) -> io::Result<usize> {
+        let before = self.seen.len();
+        self.seen.retain(|_, captured_at| match captured_at {
+            None => true, // old format, indeterminate age → keep
+            Some(ts) => OffsetDateTime::parse(ts, &Rfc3339)
+                .ok()
+                .map(|dt| dt >= cutoff)
+                .unwrap_or(true), // unparseable → keep
+        });
+        let removed = before - self.seen.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        self.rewrite_index()?;
+        Ok(removed)
+    }
+
     /// Atomically rewrite the dedupe index file.
     fn rewrite_index(&self) -> io::Result<()> {
         let tmp_path = self.index_path.with_extension("tmp");
@@ -554,6 +575,8 @@ pub struct IngestService {
     dedupe: DedupeStore,
     archive_duplicates: bool,
     broadcast_mode: bool,
+    dedupe_retention: Option<Duration>,
+    insert_count: u64,
 }
 
 impl IngestService {
@@ -563,6 +586,8 @@ impl IngestService {
             dedupe,
             archive_duplicates: false,
             broadcast_mode: false,
+            dedupe_retention: None,
+            insert_count: 0,
         }
     }
 
@@ -572,6 +597,10 @@ impl IngestService {
 
     pub fn set_broadcast_mode(&mut self, broadcast_mode: bool) {
         self.broadcast_mode = broadcast_mode;
+    }
+
+    pub fn set_dedupe_retention(&mut self, retention: Duration) {
+        self.dedupe_retention = Some(retention);
     }
 
     pub fn process_bytes(&mut self, hint: IngestHint, input: &[u8]) -> Result<ProcessReport> {
@@ -634,6 +663,19 @@ impl IngestService {
         let duplicate = !self.dedupe.insert(&record.fingerprint)?;
         if duplicate && !self.archive_duplicates {
             return Ok(());
+        }
+
+        // Periodic dedupe pruning for bounded retention.
+        if !duplicate {
+            self.insert_count += 1;
+            if let Some(retention) = self.dedupe_retention
+                && self.insert_count % 1000 == 0
+            {
+                let cutoff = OffsetDateTime::now_utc()
+                    .checked_sub(time::Duration::seconds(retention.as_secs() as i64))
+                    .unwrap_or_else(OffsetDateTime::now_utc);
+                let _ = self.dedupe.prune_before_datetime(cutoff);
+            }
         }
 
         if self.broadcast_mode {

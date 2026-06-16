@@ -218,6 +218,9 @@ fn ingest_loop(
     let mut service = IngestService::new(router, dedupe);
     service.set_archive_duplicates(options.archive_duplicates);
     service.set_broadcast_mode(options.broadcast_mode);
+    if options.broadcast_mode {
+        service.set_dedupe_retention(Duration::from_secs(3600));
+    }
 
     run_daemon(
         &options.client,

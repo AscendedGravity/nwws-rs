@@ -1679,6 +1679,9 @@ fn oi_daemon_command(archive_dir: &Path, options: OiDaemonOptions) -> Result<(),
     let mut service = IngestService::new(router, dedupe);
     service.set_archive_duplicates(options.archive_duplicates);
     service.set_broadcast_mode(options.broadcast);
+    if options.broadcast {
+        service.set_dedupe_retention(Duration::from_secs(3600));
+    }
 
     let daemon_options = DaemonOptions {
         initial_history: options.history,
