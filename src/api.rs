@@ -488,6 +488,8 @@ pub struct ActiveWarningRecord {
     pub headline: Option<String>,
     pub raw_bulletin_blake3: String,
     pub archive_id: String,
+    pub tornado_tag: Option<String>,
+    pub damage_threat: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1171,6 +1173,8 @@ fn collect_active_warning_states(
                     headline: segment.headline.clone(),
                     raw_bulletin_blake3: message.raw_bulletin_blake3.clone(),
                     archive_id: message.archive_id.clone(),
+                    tornado_tag: segment.tornado_tag.map(str::to_string),
+                    damage_threat: segment.damage_threat.clone(),
                 };
                 upsert_active_warning_state(states, key, sort_key, Some(record));
             }
