@@ -5,7 +5,7 @@ use crate::geo::{LatLonBlock, TimeMotLoc};
 use crate::header::AwipsId;
 use crate::oi::{NwwsOiMessage, NwwsOiPayload};
 use crate::ugc::UgcString;
-use crate::vtec::{Hvtec, Phenomenon, Pvtec, VtecAction};
+use crate::vtec::{Hvtec, Phenomenon, Pvtec, Significance, VtecAction};
 use crate::wmo::WmoMessage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -509,6 +509,15 @@ fn classify_family(
         .flat_map(|segment| segment.pvtec.iter())
         .next()
     {
+        // Check significance first: Watch (A) and Advisory (Y) should be
+        // classified by significance, not by phenomenon. WOU, WCN, and SEL
+        // products often have 4-character AWIPS IDs that fail the 5-6 char
+        // validation, so we reach here via PVTEC fallback. Without this
+        // check a Tornado Watch (TO.A) would be classified as Tornado.
+        match first.significance {
+            Significance::Watch => return ProductFamily::Watch,
+            _ => {}
+        }
         return classify_phenomenon(first.phenomenon);
     }
 
