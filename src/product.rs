@@ -514,9 +514,8 @@ fn classify_family(
         // products often have 4-character AWIPS IDs that fail the 5-6 char
         // validation, so we reach here via PVTEC fallback. Without this
         // check a Tornado Watch (TO.A) would be classified as Tornado.
-        match first.significance {
-            Significance::Watch => return ProductFamily::Watch,
-            _ => {}
+        if first.significance == Significance::Watch {
+            return ProductFamily::Watch;
         }
         return classify_phenomenon(first.phenomenon);
     }
